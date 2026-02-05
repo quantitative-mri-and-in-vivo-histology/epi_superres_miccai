@@ -1,0 +1,57 @@
+{
+  "name": "EPI Super-Resolution MICCAI",
+  "dockerComposeFile": [
+    "docker-compose.yml",
+    "docker-compose.override.yml"
+  ],
+  "service": "devcontainer",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "eamodio.gitlens",
+        "ms-python.debugpy",
+        "hediet.debug-visualizer",
+        "visualstudioexptteam.vscodeintellicode",
+        "github.copilot",
+        "github.copilot-chat",
+        "visualstudioexptteam.intellicode-api-usage-examples",
+        "formulahendry.code-runner",
+        "ms-python.isort"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-python.python",
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.python",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        },
+        "python.defaultInterpreterPath": "python3",
+        "python.languageServer": "Pylance",
+        "jupyter.notebookFileRoot": "${workspaceFolder}",
+        "jupyter.enablePlotViewer": true,
+        "python.terminal.executeInFileDir": false,
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "bash",
+            "icon": "terminal-bash"
+          },
+          "zsh": {
+            "path": "zsh"
+          }
+        }
+      }
+    }
+  },
+  "remoteUser": "node",
+  "workspaceFolder": "/workspace",
+  "postStartCommand": "npm update -g @anthropic-ai/claude-code && /workspace/.devcontainer/setup-jax-gpu.sh && /workspace/.devcontainer/install-epi1.sh",
+  "waitFor": "postStartCommand"
+}

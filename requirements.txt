@@ -1,0 +1,18 @@
+# epi1 package - installed via setup script (see .devcontainer/install-epi1.sh)
+# Default: from GitHub, Local dev: editable from EPI1_PATH
+
+# Additional packages for super-resolution project
+matplotlib
+scipy
+scikit-image
+pandas
+
+# Interactive plotting and visualization
+ipykernel
+ipywidgets
+plotly
+
+# Debugging
+ipython
+ipdb
+debugpy
