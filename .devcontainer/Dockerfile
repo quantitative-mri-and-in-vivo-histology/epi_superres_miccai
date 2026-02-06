@@ -60,8 +60,8 @@ RUN ARCH=$(uname -m) && \
 
 ENV PATH="/opt/conda/bin:$PATH"
 
-# Install MRtrix3
-RUN conda install -c mrtrix3 -c conda-forge mrtrix3 -y && \
+# Install MRtrix3 and ANTs
+RUN conda install -c mrtrix3 -c conda-forge mrtrix3 ants -y && \
   conda clean -afy
 
 # Create node user (UID 1000 to match typical dev environments)

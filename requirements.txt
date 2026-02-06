@@ -7,6 +7,10 @@ scipy
 scikit-image
 pandas
 
+# ANTs and brain extraction
+antspyx
+antspynet
+
 # Interactive plotting and visualization
 ipykernel
 ipywidgets
