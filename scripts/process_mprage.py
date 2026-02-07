@@ -11,8 +11,8 @@ import ants
 
 ROOT = Path(__file__).resolve().parent.parent
 INPUT_IMAGE = ROOT / "data/8_pe/raw/anat/mprage.nii.gz"
-OUTPUT_DIR_NATIVE = ROOT / "data/8_pe/processed/mprage/native"
-OUTPUT_DIR_1P7 = ROOT / "data/8_pe/processed/mprage/downsampled_1p7mm"
+OUTPUT_DIR_NATIVE = ROOT / "data/8_pe/processed/anat/native"
+OUTPUT_DIR_1P7 = ROOT / "data/8_pe/processed/anat/downsampled_1p7mm"
 TARGET_VOXEL = 1.7
 
 
