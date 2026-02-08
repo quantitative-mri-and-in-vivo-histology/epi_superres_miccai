@@ -158,7 +158,7 @@ def run_dwifslpreproc(
         )
 
         cmd += f" -topup_options ' --nthr={nthreads}'"
-        cmd += f" -eddy_options ' --repol --data_is_shelled --slm=linear --dfields --nthr={nthreads}'"
+        cmd += f" -eddy_options ' --repol --data_is_shelled --slm=linear --dfields'"
 
         run_command(cmd)
 
