@@ -59,8 +59,8 @@ def copy_associated_files(src: Path, dst: Path):
 
 
 def find_dwi_files(input_dir: Path) -> list:
-    """Find all NIfTI files in a directory."""
-    files = sorted(input_dir.glob("*.nii.gz")) + sorted(input_dir.glob("*.nii"))
+    """Find all NIfTI files matching dwi_* pattern in a directory."""
+    files = sorted(input_dir.glob("dwi_*.nii.gz")) + sorted(input_dir.glob("dwi_*.nii"))
     # Remove duplicates (file.nii when file.nii.gz also exists)
     gz_stems = {
         f.name.replace(".nii.gz", "")
