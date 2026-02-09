@@ -8,7 +8,7 @@
 % Base data directory
 base_dir = '../../data/single_pe_rpe/native_res';
 source_dir = fullfile(base_dir, 'source', 'nifti_spm');
-output_base_dir = fullfile(base_dir, 'processed', 'mpm');
+output_base_dir = fullfile(base_dir, 'processed');
 
 % Create output directory if it doesn't exist
 if ~exist(output_base_dir, 'dir')
@@ -36,7 +36,7 @@ for subj_idx = 1:length(subject_dirs)
     fprintf('========================================\n');
 
     % Create subject-specific output directory
-    output_dir = fullfile(output_base_dir, subject_id);
+    output_dir = fullfile(output_base_dir, subject_id, 'mpm');
     if ~exist(output_dir, 'dir')
         mkdir(output_dir);
     end

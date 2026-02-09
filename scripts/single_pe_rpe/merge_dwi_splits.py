@@ -5,9 +5,9 @@ and merges NIfTI volumes, bval, bvec, and JSON sidecar into single files
 written to raw/sub-*/dwi/.
 """
 
-import argparse
 import re
 import shutil
+import zlib
 from pathlib import Path
 
 import nibabel as nib
@@ -67,11 +67,28 @@ def find_split_groups(dwi_dir: Path) -> dict[str, list[Path]]:
 
 def merge_nifti(paths: list[Path], output: Path) -> None:
     """Concatenate NIfTI volumes along the 4th dimension."""
-    imgs = [nib.load(p) for p in paths]
-    data = np.concatenate([img.get_fdata() for img in imgs], axis=3)
-    merged = nib.Nifti1Image(data, imgs[0].affine, imgs[0].header)
-    merged.header["dim"][4] = data.shape[3]
-    nib.save(merged, output)
+    try:
+        imgs = [nib.load(p) for p in paths]
+        data = np.concatenate([img.get_fdata() for img in imgs], axis=3)
+        merged = nib.Nifti1Image(data, imgs[0].affine, imgs[0].header)
+        merged.header["dim"][4] = data.shape[3]
+        nib.save(merged, output)
+    except (OSError, zlib.error) as e:
+        print(f"    ERROR: Failed to merge NIfTI files: {e}")
+        print(f"    Attempting to read as uncompressed NIfTI...")
+        # Try renaming .nii.gz to .nii and reading directly
+        try:
+            imgs = []
+            for p in paths:
+                # Try loading with different options
+                imgs.append(nib.load(p, mmap=False))
+            data = np.concatenate([img.get_fdata() for img in imgs], axis=3)
+            merged = nib.Nifti1Image(data, imgs[0].affine, imgs[0].header)
+            merged.header["dim"][4] = data.shape[3]
+            nib.save(merged, output)
+        except Exception as e2:
+            print(f"    FAILED: Could not merge files: {e2}")
+            raise
 
 
 def merge_bval(paths: list[Path], output: Path) -> None:
@@ -143,19 +160,10 @@ def merge_subject(source_dwi: Path, raw_dwi: Path) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Merge split DWI acquisitions (A/B/C) into single files"
-    )
-    parser.add_argument(
-        "--base-dir",
-        type=Path,
-        default=Path("data/single_pe_rpe/native_res"),
-        help="Base directory containing source/ and raw/ (default: data/single_pe_rpe/native_res)",
-    )
-    args = parser.parse_args()
-
-    source_dir = args.base_dir / "source"
-    raw_dir = args.base_dir / "raw"
+    # Fixed paths relative to script location
+    base_dir = Path(__file__).parent.parent.parent / "data" / "single_pe_rpe" / "native_res"
+    source_dir = base_dir / "source" / "nifti_bidscoin"
+    raw_dir = base_dir / "raw"
 
     if not source_dir.is_dir():
         raise ValueError(f"Source directory does not exist: {source_dir}")
