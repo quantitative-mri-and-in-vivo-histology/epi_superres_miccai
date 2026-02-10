@@ -52,6 +52,6 @@
   },
   "remoteUser": "node",
   "workspaceFolder": "/workspace",
-  "postStartCommand": "npm update -g @anthropic-ai/claude-code && /workspace/.devcontainer/setup-jax-gpu.sh && /workspace/.devcontainer/install-epi1.sh",
+  "postStartCommand": "sudo npm update -g @anthropic-ai/claude-code && /workspace/.devcontainer/setup-jax-gpu.sh && /workspace/.devcontainer/install-epi1.sh",
   "waitFor": "postStartCommand"
 }
