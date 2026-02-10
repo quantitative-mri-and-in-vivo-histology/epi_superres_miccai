@@ -181,6 +181,61 @@ def combine_and_apply_warps(
     return out_file
 
 
+def _read_itk_affine(mat_file: Path) -> "np.ndarray":
+    """Read an ITK/ANTs ``.mat`` affine transform and return a 4x4 matrix.
+
+    ANTs saves transforms as MATLAB v5 ``.mat`` files containing:
+    - ``AffineTransform_double_3_3``: 12 params (9 rotation + 3 translation)
+    - ``fixed``: 3 params (center of rotation)
+
+    The full transform is: p' = R @ (p - center) + center + t.
+    """
+    import numpy as np
+    import scipy.io as sio
+
+    data = sio.loadmat(str(mat_file))
+
+    # Find the transform key (may vary: AffineTransform_double_3_3 or _float_3_3)
+    transform_key = None
+    for key in data:
+        if key.startswith("AffineTransform"):
+            transform_key = key
+            break
+    if transform_key is None:
+        raise ValueError(f"No AffineTransform found in {mat_file}")
+
+    params = data[transform_key].flatten()
+    fixed = data["fixed"].flatten()
+
+    R = params[:9].reshape(3, 3)
+    t = params[9:12]
+    center = fixed[:3]
+
+    mat = np.eye(4)
+    mat[:3, :3] = R
+    mat[:3, 3] = t + center - R @ center
+    return mat
+
+
+def _fsl_vox2mm(img: "nib.Nifti1Image") -> "np.ndarray":
+    """Compute FSL's internal voxel-to-mm scaling matrix for an image.
+
+    FSL uses a scaled voxel coordinate system. If the sform determinant
+    is positive (neurological storage order), FSL flips the x-axis to
+    work in its preferred radiological convention.
+    """
+    import numpy as np
+
+    zooms = np.array(img.header.get_zooms()[:3])
+    mat = np.diag([zooms[0], zooms[1], zooms[2], 1.0])
+
+    if np.linalg.det(img.affine[:3, :3]) > 0:
+        mat[0, 0] = -zooms[0]
+        mat[0, 3] = (img.shape[0] - 1) * zooms[0]
+
+    return mat
+
+
 def convert_ants_to_flirt(
     ants_mat: Path,
     ref: Path,
@@ -189,9 +244,15 @@ def convert_ants_to_flirt(
 ) -> Path:
     """Convert an ANTs affine transform to FLIRT format.
 
-    Uses ``c3d_affine_tool`` to convert an ANTs/ITK ``.mat`` transform
-    to an FSL FLIRT ``.txt`` matrix. This is needed because FSL's
-    ``convertwarp`` requires FLIRT-format transforms.
+    Pure-Python replacement for ``c3d_affine_tool -ras2fsl``.  Converts
+    an ANTs/ITK ``.mat`` transform to an FSL FLIRT ``.txt`` matrix.
+
+    The conversion chain is::
+
+        FLIRT = FSL_ref @ inv(sform_ref) @ inv(A_ras) @ sform_src @ inv(FSL_src)
+
+    where ``A_ras`` is the ANTs transform converted from LPS to RAS
+    (maps fixed/ref → moving/src), so its inverse maps src → ref.
 
     Parameters
     ----------
@@ -212,16 +273,35 @@ def convert_ants_to_flirt(
     Path
         Path to the output FLIRT matrix
     """
+    import nibabel as nib
+    import numpy as np
+
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    run_command(
-        f"c3d_affine_tool"
-        f" -ref {ref}"
-        f" -src {src}"
-        f" -itk {ants_mat}"
-        f" -ras2fsl"
-        f" -o {output}"
+    # Read ITK transform (maps fixed→moving in LPS coordinates)
+    itk_mat = _read_itk_affine(ants_mat)
+
+    # Convert LPS→RAS (negate x and y axes)
+    c = np.diag([-1.0, -1.0, 1.0, 1.0])
+    ras_mat = c @ itk_mat @ c  # maps ref_ras → src_ras
+
+    # Load image headers
+    ref_img = nib.load(str(ref))
+    src_img = nib.load(str(src))
+
+    # FSL scaling matrices
+    fsl_ref = _fsl_vox2mm(ref_img)
+    fsl_src = _fsl_vox2mm(src_img)
+
+    # FLIRT = FSL_ref @ inv(sform_ref) @ inv(A_ras) @ sform_src @ inv(FSL_src)
+    flirt_mat = (
+        fsl_ref
+        @ np.linalg.inv(ref_img.affine)
+        @ np.linalg.inv(ras_mat)
+        @ src_img.affine
+        @ np.linalg.inv(fsl_src)
     )
 
+    np.savetxt(output, flirt_mat, fmt="%.10f")
     return output

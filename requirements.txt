@@ -7,9 +7,7 @@ scipy
 scikit-image
 pandas
 
-# ANTs and brain extraction
-antspyx
-antspynet
+# ANTs and brain extraction - installed separately in Dockerfile with --only-binary
 
 # Interactive plotting and visualization
 ipykernel

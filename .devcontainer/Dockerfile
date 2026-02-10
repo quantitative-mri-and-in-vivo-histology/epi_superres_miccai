@@ -39,6 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libopenblas-dev \
   liblapack-dev \
   pkg-config \
+  bc \
+  dc \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Ensure /usr/bin/python3 points to our Python 3.11
@@ -137,6 +139,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 COPY requirements.txt /tmp/requirements.txt
 RUN uv pip install --system -r /tmp/requirements.txt && \
   rm /tmp/requirements.txt
+
+# Install antspyx/antspynet separately with binary-only (avoid building ITK from source)
+RUN uv pip install --system --only-binary :all: antspyx antspynet
 
 # Switch back to node user
 USER node

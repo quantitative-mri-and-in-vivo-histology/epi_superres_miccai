@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Process anatomical reference for single_pe_rpe dataset.
+
+Uses MTsat map for brain extraction and tissue segmentation, then downsamples
+all MPM maps along with brain mask and segmentation to 1.6mm isotropic.
+"""
+
+import sys
+from pathlib import Path
+
+# Add utils to path
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from utils.cmd_utils import run_command
+
+
+INPUT_BASE = ROOT / "data/single_pe_rpe/native_res/processed"
+TARGET_VOXEL = 1.6
+
+
+def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, Path]:
+    """Brain extraction and tissue segmentation using MTsat map.
+
+    Pipeline:
+    1. Brain extraction (FSL BET)
+    2. Tissue segmentation (FSL FAST): 1=CSF, 2=GM, 3=WM
+
+    Parameters
+    ----------
+    mtsat_path : Path
+        Input MTsat NIfTI file.
+    output_dir : Path
+        Output directory for brain mask and segmentation.
+
+    Returns
+    -------
+    dict[str, Path]
+        Dictionary with paths to brain_mask and segmentation.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Brain extraction with FSL BET
+    print("  Brain extraction (FSL BET)...")
+    brain_path = output_dir / "mtsat_brain.nii.gz"
+    brain_mask_path = output_dir / "brain_mask.nii.gz"
+
+    cmd = ["bet", str(mtsat_path), str(brain_path), "-m", "-R"]
+    run_command(cmd, verbose=False)
+
+    # BET writes mask as <output>_mask.nii.gz
+    bet_mask_path = output_dir / "mtsat_brain_mask.nii.gz"
+    bet_mask_path.rename(brain_mask_path)
+    print(f"    Saved brain mask: {brain_mask_path.name}")
+
+    # Tissue segmentation with FSL FAST (1=CSF, 2=GM, 3=WM)
+    print("  Tissue segmentation (FSL FAST)...")
+    fast_prefix = str(output_dir / "fast")
+
+    cmd = ["fast", "-o", fast_prefix, str(brain_path)]
+    run_command(cmd, verbose=False)
+
+    # FAST outputs: fast_seg.nii.gz, fast_pve_0/1/2.nii.gz, etc.
+    seg_path = output_dir / "segmentation.nii.gz"
+    Path(f"{fast_prefix}_seg.nii.gz").rename(seg_path)
+    print(f"    Saved segmentation: {seg_path.name}")
+
+    # Clean up intermediate brain-extracted image
+    if brain_path.exists():
+        brain_path.unlink()
+
+    return {
+        "brain_mask": brain_mask_path,
+        "segmentation": seg_path,
+    }
+
+
+def downsample_image(input_path: Path, output_path: Path, voxel: float, interp: str = "sinc"):
+    """Downsample image using MRtrix mrgrid.
+
+    Parameters
+    ----------
+    input_path : Path
+        Input image file.
+    output_path : Path
+        Output downsampled file.
+    voxel : float
+        Target isotropic voxel size in mm.
+    interp : str
+        Interpolation method ('sinc' or 'nearest').
+    """
+    cmd = [
+        "mrgrid", str(input_path), "regrid", str(output_path),
+        "-voxel", str(voxel), "-interp", interp, "-force"
+    ]
+    run_command(cmd, verbose=False)
+
+
+def process_subject(subject_dir: Path, target_voxel: float):
+    """Process one subject: brain extraction, segmentation, and downsampling.
+
+    Parameters
+    ----------
+    subject_dir : Path
+        Subject directory in processed/ (e.g., processed/sub-V06460).
+    target_voxel : float
+        Target isotropic voxel size in mm.
+    """
+    mpm_dir = subject_dir / "mpm"
+
+    if not mpm_dir.is_dir():
+        print("  No mpm/ folder, skipping")
+        return
+
+    # Find MTsat map for brain extraction
+    mtsat_path = mpm_dir / f"{subject_dir.name}_MTsat.nii"
+    if not mtsat_path.exists():
+        print("  No MTsat map found, skipping")
+        return
+
+    # Find all MPM maps (exclude already downsampled)
+    mpm_files = sorted([f for f in mpm_dir.glob("*.nii")
+                       if "_downsampled" not in f.name])
+
+    if not mpm_files:
+        print("  No MPM maps found, skipping")
+        return
+
+    print(f"  Found {len(mpm_files)} MPM map(s)")
+
+    # Brain extraction and segmentation using MTsat
+    anat_outputs = brain_extract_and_segment(mtsat_path, mpm_dir)
+
+    # Downsample all MPM maps
+    print("  Downsampling MPM maps...")
+    for mpm_file in mpm_files:
+        output_name = f"{mpm_file.stem}_downsampled.nii.gz"
+        output_file = mpm_dir / output_name
+        print(f"    {mpm_file.name} -> {output_name}")
+        downsample_image(mpm_file, output_file, target_voxel, interp="sinc")
+
+    # Downsample brain mask and segmentation
+    print("  Downsampling brain mask and segmentation...")
+    for key, src_path in anat_outputs.items():
+        stem = src_path.stem.replace('.nii', '')  # Handle .nii.gz
+        suffix = f"_downsampled_{str(target_voxel).replace('.', 'p')}"
+        dst_name = f"{stem}{suffix}.nii.gz"
+        dst_path = mpm_dir / dst_name
+
+        interp = "nearest" if "mask" in key else "sinc"
+        print(f"    {src_path.name} ({interp}) -> {dst_name}")
+        downsample_image(src_path, dst_path, target_voxel, interp=interp)
+
+    print(f"  Saved all outputs to: {mpm_dir}")
+
+
+def main():
+    """Process all subjects in the single_pe_rpe dataset."""
+    if not INPUT_BASE.is_dir():
+        raise ValueError(f"Input directory does not exist: {INPUT_BASE}")
+
+    subjects = sorted([d for d in INPUT_BASE.iterdir()
+                      if d.is_dir() and d.name.startswith("sub-")])
+
+    print(f"Processing single_pe_rpe anatomical reference")
+    print(f"Target resolution: {TARGET_VOXEL}mm isotropic")
+    print(f"Found {len(subjects)} subject(s)")
+    print()
+
+    for subject_dir in subjects:
+        print(f"=== {subject_dir.name} ===")
+
+        try:
+            process_subject(subject_dir, TARGET_VOXEL)
+        except Exception as e:
+            print(f"  ERROR: Failed to process {subject_dir.name}: {e}")
+            continue
+
+        print()
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()

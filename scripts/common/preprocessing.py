@@ -8,7 +8,8 @@ import shutil
 from pathlib import Path
 
 from utils.cmd_utils import run_command
-from utils.nifti_utils import get_bval_path, get_bvec_path, get_json_path, strip_nifti_ext
+from utils.nifti_utils import get_bval_path, get_bvec_path, get_json_path, get_pe_direction, get_readout_time, strip_nifti_ext
+from utils.warp_utils import combine_and_apply_warps, convert_ants_to_flirt
 
 
 def add_suffix(nii_path: Path, suffix: str) -> Path:
@@ -93,3 +94,541 @@ def denoise_dwi(
         cmd += f" -nthreads {nthreads}"
 
     run_command(cmd)
+
+
+def run_dwifslpreproc(
+    dwi: Path,
+    dwi_rpe: Path,
+    output_dir: Path,
+    mode: str = "b0_rpe",
+    readout_time: float | None = None,
+    nthreads: int = 0,
+    keep_tmp: bool = False,
+) -> tuple[Path, Path]:
+    """Run MRtrix dwifslpreproc for distortion/motion correction.
+
+    Saves eddy's per-volume displacement fields and outlier-free data
+    to ``output_dir/eddy_output/``, enabling later single-interpolation
+    warp combination.
+
+    Parameters
+    ----------
+    dwi : Path
+        Input DWI data (primary PE direction)
+    dwi_rpe : Path
+        DWI data with reverse PE direction (for topup)
+    output_dir : Path
+        Output directory
+    mode : str
+        Processing mode (default: "b0_rpe"):
+        - "b0_rpe": Use b0 volumes only for fieldmap estimation (-rpe_pair)
+        - "full_rpe": Merge all volumes from both PE directions (-rpe_all)
+    readout_time : float, optional
+        Total readout time in seconds (read from JSON if not provided)
+    nthreads : int
+        Number of threads for topup (0=all available)
+    keep_tmp : bool
+        Keep temporary directory for debugging
+
+    Returns
+    -------
+    tuple[Path, Path]
+        (preprocessed DWI path, eddy output directory)
+    """
+    import glob
+    import os
+    import tempfile
+
+    if mode not in ["b0_rpe", "full_rpe"]:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'b0_rpe' or 'full_rpe'")
+
+    # Detect available CPUs if nthreads=0
+    if nthreads == 0:
+        nthreads = os.cpu_count() or 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Output filename based on mode
+    if mode == "b0_rpe":
+        # Keep original PE direction in name: *_dir-AP_preprocessed.nii.gz
+        output_name = dwi.name.replace("_denoised", "_preprocessed")
+    elif mode == "full_rpe":
+        # Remove PE direction, indicate merged: *_merged_preprocessed.nii.gz
+        base_name = dwi.name.split("_dir-")[0]  # Everything before _dir-XX
+        output_name = f"{base_name}_merged_preprocessed.nii.gz"
+
+    output = output_dir / output_name
+
+    # Get bval/bvec files
+    bvec = get_bvec_path(dwi)
+    bval = get_bval_path(dwi)
+    bvec_rpe = get_bvec_path(dwi_rpe)
+    bval_rpe = get_bval_path(dwi_rpe)
+
+    # Get PE direction from JSON
+    pe_dir = get_pe_direction(dwi)
+    if pe_dir is None:
+        raise ValueError(f"PE direction not found in JSON sidecar for {dwi}")
+
+    # Get readout time from JSON if not provided
+    if readout_time is None:
+        readout_time = get_readout_time(dwi)
+
+    if readout_time is None:
+        raise ValueError(f"Readout time not found in JSON sidecar for {dwi}")
+
+    # Create temp directory
+    if keep_tmp:
+        tmp_dir = output.parent / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="dwifslpreproc_"))
+
+    # Eddy output directory (persisted after processing)
+    eddy_output_dir = output_dir / f"{output_name.replace('.nii.gz', '')}_eddy_output"
+    eddy_output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Output bvec/bval paths
+        out_bvec = get_bvec_path(output)
+        out_bval = get_bval_path(output)
+
+        # Scratch path for dwifslpreproc
+        scratch_dir = tmp_dir / "dwifslpreproc"
+
+        if mode == "b0_rpe":
+            # Extract first b0 from both PE directions
+            b0_pe = tmp_dir / "b0_pe.nii.gz"
+            b0_rpe = tmp_dir / "b0_rpe.nii.gz"
+            run_command(f"mrconvert {dwi} {b0_pe} -force -coord 3 0 -fslgrad {bvec} {bval}", verbose=False)
+            run_command(f"mrconvert {dwi_rpe} {b0_rpe} -force -coord 3 0 -fslgrad {bvec_rpe} {bval_rpe}", verbose=False)
+
+            # Merge b0s for topup (PE + RPE)
+            b0_pair = tmp_dir / "b0_pair.nii.gz"
+            run_command(f"mrcat {b0_pe} {b0_rpe} {b0_pair} -force -axis 3", verbose=False)
+
+            # Run dwifslpreproc with -rpe_pair
+            cmd = (
+                f"dwifslpreproc {dwi} {output} -force "
+                f"-nocleanup "
+                f"-fslgrad {bvec} {bval} "
+                f"-export_grad_fsl {out_bvec} {out_bval} "
+                f"-rpe_pair -se_epi {b0_pair} -pe_dir {pe_dir} "
+                f"-readout_time {readout_time} "
+                f"-scratch {scratch_dir} "
+                f"-eddyqc_all {eddy_output_dir}"
+            )
+
+        elif mode == "full_rpe":
+            # Merge full DWI volumes from both PE directions
+            merged_dwi = tmp_dir / "merged_dwi.nii.gz"
+            run_command(f"mrcat {dwi} {dwi_rpe} {merged_dwi} -force -axis 3", verbose=False)
+
+            # Merge bval files (concatenate)
+            merged_bval = tmp_dir / "merged.bval"
+            with open(bval, 'r') as f1, open(bval_rpe, 'r') as f2, open(merged_bval, 'w') as out:
+                bval1 = f1.read().strip()
+                bval2 = f2.read().strip()
+                out.write(f"{bval1} {bval2}\n")
+
+            # Merge bvec files (concatenate column-wise)
+            import numpy as np
+            merged_bvec = tmp_dir / "merged.bvec"
+            bvec1 = np.loadtxt(bvec)
+            bvec2 = np.loadtxt(bvec_rpe)
+            # Handle 1D case (single volume)
+            if bvec1.ndim == 1:
+                bvec1 = bvec1.reshape(3, 1)
+            if bvec2.ndim == 1:
+                bvec2 = bvec2.reshape(3, 1)
+            merged_bvec_data = np.hstack([bvec1, bvec2])
+            np.savetxt(merged_bvec, merged_bvec_data, fmt='%.6f')
+
+            # Run dwifslpreproc with -rpe_all
+            cmd = (
+                f"dwifslpreproc {merged_dwi} {output} -force "
+                f"-nocleanup "
+                f"-fslgrad {merged_bvec} {merged_bval} "
+                f"-export_grad_fsl {out_bvec} {out_bval} "
+                f"-rpe_all -pe_dir {pe_dir} "
+                f"-readout_time {readout_time} "
+                f"-scratch {scratch_dir} "
+                f"-eddyqc_all {eddy_output_dir}"
+            )
+
+        cmd += f" -topup_options ' --nthr={nthreads}'"
+        cmd += f" -eddy_options ' --repol --data_is_shelled --slm=linear --dfields'"
+
+        run_command(cmd, verbose=True)
+
+        # Copy dfields + dwi_post_eddy from scratch
+        dfields_dir = eddy_output_dir / "dfields"
+        dfields_dir.mkdir(parents=True, exist_ok=True)
+
+        dfield_files = sorted(glob.glob(
+            str(scratch_dir / "dwi_post_eddy.eddy_displacement_fields.*.nii.gz")
+        ))
+        for f in dfield_files:
+            shutil.copy(f, dfields_dir)
+
+        # Copy fully corrected dwi_post_eddy
+        dwi_post_eddy = scratch_dir / "dwi_post_eddy.nii.gz"
+        if dwi_post_eddy.exists():
+            shutil.copy(dwi_post_eddy, eddy_output_dir / "dwi_post_eddy.nii.gz")
+
+    finally:
+        if not keep_tmp:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return output, eddy_output_dir
+
+
+def create_brain_mask(dwi: Path, output_dir: Path) -> Path:
+    """Create brain mask from DWI using BET on mean b=0.
+
+    Parameters
+    ----------
+    dwi : Path
+        Input DWI (with matching .bvec/.bval)
+    output_dir : Path
+        Output directory for mask and intermediate files
+
+    Returns
+    -------
+    Path
+        Path to brain mask
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bvec = get_bvec_path(dwi)
+    bval = get_bval_path(dwi)
+
+    # Extract mean b=0
+    mean_b0 = output_dir / "mean_b0.nii.gz"
+    run_command(
+        f"dwiextract -bzero -force -fslgrad {bvec} {bval} {dwi} - "
+        f"| mrmath - mean -axis 3 {mean_b0} -force",
+        verbose=False,
+    )
+
+    # Brain extraction with BET
+    bet_output = output_dir / "mean_b0_brain"
+    run_command(f"bet {mean_b0} {bet_output} -m -R", verbose=False)
+
+    # Rename mask
+    brain_mask = output_dir / "brain_mask.nii.gz"
+    Path(f"{bet_output}_mask.nii.gz").rename(brain_mask)
+    Path(f"{bet_output}.nii.gz").unlink(missing_ok=True)
+
+    # Erode by 1 voxel to tighten the mask
+    run_command(f"maskfilter {brain_mask} erode {brain_mask} -force", verbose=False)
+
+    return brain_mask
+
+
+def _diag_validity_mask(image: Path, mask: Path, diag_low: float, diag_high: float, tmp_dir: Path) -> Path:
+    """Create a validity mask from diagonal tensor elements.
+
+    Returns a 3D binary mask where all diagonal elements (volumes 0-2)
+    are within [diag_low, diag_high] and the voxel is inside the brain mask.
+    Also replaces NaN/Inf with 0 in the image (in-place).
+    """
+    stem = image.stem.replace(".nii", "")
+    # Replace NaN/Inf with 0
+    run_command(f"mrcalc {image} -finite {image} 0 -if {image} -force", verbose=False)
+    # Extract diagonal volumes (0, 1, 2)
+    diag = tmp_dir / f"_diag_{stem}.nii.gz"
+    run_command(f"mrconvert {image} -coord 3 0:2 {diag} -force", verbose=False)
+    # Per-voxel validity: all diags in [low, high]
+    valid = tmp_dir / f"_valid_{stem}.nii.gz"
+    run_command(
+        f"mrcalc {diag} {diag_low} -ge {diag} {diag_high} -le -mult "
+        f"{mask} -mult {valid} -force",
+        verbose=False,
+    )
+    # Collapse across volumes: valid only if ALL diags pass
+    valid_mask = tmp_dir / f"_valid_mask_{stem}.nii.gz"
+    run_command(f"mrmath {valid} min -axis 3 {valid_mask} -force", verbose=False)
+    # Clean up intermediates
+    diag.unlink(missing_ok=True)
+    valid.unlink(missing_ok=True)
+    return valid_mask
+
+
+def _threshold_metric(image: Path, low: float, high: float | None = None) -> None:
+    """Zero out voxels outside [low, high] range (in-place).
+
+    If high is None, only apply lower bound.
+    """
+    if high is not None:
+        run_command(
+            f"mrcalc {image} {low} -ge {image} {high} -le -mult {image} -mult {image} -force",
+            verbose=False,
+        )
+    else:
+        run_command(
+            f"mrcalc {image} {low} -ge {image} -mult {image} -force",
+            verbose=False,
+        )
+
+
+def fit_tensors(dwi: Path, output_prefix: Path, mask: Path) -> dict[str, Path]:
+    """Fit DTI and DKI tensors and compute metrics.
+
+    Applies physical bounds filtering after metric computation:
+    - FA: [0, 1]
+    - MD: [0, 0.003] mm²/s
+    - S0: > 0
+    - MK: [0, 3]
+
+    Parameters
+    ----------
+    dwi : Path
+        Input DWI (with matching .bvec/.bval)
+    output_prefix : Path
+        Output file prefix (e.g., /path/to/sub-V06460_dir-AP_preprocessed)
+    mask : Path
+        Brain mask image
+
+    Returns
+    -------
+    dict[str, Path]
+        Dictionary with paths to all output tensors and metrics
+    """
+    output_dir = output_prefix.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_dir = output_dir / "_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    bvec = get_bvec_path(dwi)
+    bval = get_bval_path(dwi)
+
+    outputs = {}
+
+    # DTI
+    print("    Fitting DTI...")
+    dti_d = Path(f"{output_prefix}_dti_d.nii.gz")
+    dti_s0 = Path(f"{output_prefix}_dti_s0.nii.gz")
+
+    cmd = f"dwi2tensor {dwi} {dti_d} -force -fslgrad {bvec} {bval} -iter 10 -mask {mask} -b0 {dti_s0}"
+    run_command(cmd, verbose=False)
+
+    print("    Cleaning diffusion tensor...")
+    dt_valid = _diag_validity_mask(dti_d, mask, diag_low=0, diag_high=0.003, tmp_dir=tmp_dir)
+    run_command(f"mrcalc {dti_d} {dt_valid} -mult {dti_d} -force", verbose=False)
+    run_command(f"mrcalc {dti_s0} {dt_valid} -mult {dti_s0} -force", verbose=False)
+    dt_valid.unlink(missing_ok=True)
+
+    dti_fa = Path(f"{output_prefix}_dti_fa.nii.gz")
+    dti_md = Path(f"{output_prefix}_dti_md.nii.gz")
+    cmd = f"tensor2metric {dti_d} -force -fa {dti_fa} -adc {dti_md}"
+    run_command(cmd, verbose=False)
+
+    print("    Filtering DTI metrics...")
+    _threshold_metric(dti_fa, 0, 1)
+    _threshold_metric(dti_md, 0, 0.003)
+    result = run_command(
+        f"mrstats {dti_s0} -mask {mask} -output mean", verbose=False,
+    )
+    s0_mean = float(result.stdout.strip())
+    _threshold_metric(dti_s0, 0, s0_mean * 3)
+
+    outputs.update({
+        "dti_d": dti_d,
+        "dti_fa": dti_fa,
+        "dti_md": dti_md,
+        "dti_s0": dti_s0,
+    })
+
+    # DKI
+    print("    Fitting DKI...")
+    dki_d = Path(f"{output_prefix}_dki_d.nii.gz")
+    dki_k = Path(f"{output_prefix}_dki_k.nii.gz")
+    dki_s0 = Path(f"{output_prefix}_dki_s0.nii.gz")
+
+    cmd = f"dwi2tensor {dwi} {dki_d} -force -fslgrad {bvec} {bval} -iter 10 -mask {mask} -dkt {dki_k} -b0 {dki_s0}"
+    run_command(cmd, verbose=False)
+
+    print("    Cleaning tensors...")
+    d_valid = _diag_validity_mask(dki_d, mask, diag_low=0, diag_high=0.003, tmp_dir=tmp_dir)
+    k_valid = _diag_validity_mask(dki_k, mask, diag_low=0, diag_high=10, tmp_dir=tmp_dir)
+    # Combined mask: voxel must pass both D and K checks
+    combined_valid = tmp_dir / "_combined_valid.nii.gz"
+    run_command(f"mrcalc {d_valid} {k_valid} -mult {combined_valid} -force", verbose=False)
+    d_valid.unlink(missing_ok=True)
+    k_valid.unlink(missing_ok=True)
+    # Apply combined mask to D, K, and S0
+    run_command(f"mrcalc {dki_d} {combined_valid} -mult {dki_d} -force", verbose=False)
+    run_command(f"mrcalc {dki_k} {combined_valid} -mult {dki_k} -force", verbose=False)
+    run_command(f"mrcalc {dki_s0} {combined_valid} -mult {dki_s0} -force", verbose=False)
+    combined_valid.unlink(missing_ok=True)
+
+    dki_fa = Path(f"{output_prefix}_dki_fa.nii.gz")
+    dki_md = Path(f"{output_prefix}_dki_md.nii.gz")
+    cmd = f"tensor2metric {dki_d} -force -fa {dki_fa} -adc {dki_md}"
+    run_command(cmd, verbose=False)
+
+    # Compute mean kurtosis from kurtosis tensor
+    dki_mk = Path(f"{output_prefix}_dki_mk.nii.gz")
+    run_command(f"mrmath {dki_k} mean -axis 3 {dki_mk} -force", verbose=False)
+
+    print("    Filtering DKI metrics...")
+    _threshold_metric(dki_fa, 0, 1)
+    _threshold_metric(dki_md, 0, 0.003)
+    result = run_command(
+        f"mrstats {dki_s0} -mask {mask} -output mean", verbose=False,
+    )
+    s0_mean = float(result.stdout.strip())
+    _threshold_metric(dki_s0, 0, s0_mean * 3)
+    _threshold_metric(dki_mk, 0, 3)
+
+    outputs.update({
+        "dki_d": dki_d,
+        "dki_k": dki_k,
+        "dki_fa": dki_fa,
+        "dki_md": dki_md,
+        "dki_mk": dki_mk,
+        "dki_s0": dki_s0,
+    })
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return outputs
+
+
+def register_to_anat_ref(
+    preprocessed_dwi: Path,
+    eddy_output_dir: Path,
+    anat_ref_image: Path,
+    output_dir: Path,
+    brain_mask: Path | None = None,
+    nthreads: int = 0,
+) -> tuple[Path, Path]:
+    """Register DWI to anatomical reference with single-interpolation warp combination.
+
+    Performs rigid registration of DWI → anatomical reference, then combines
+    eddy displacement fields + registration transform in a single interpolation step.
+
+    Parameters
+    ----------
+    preprocessed_dwi : Path
+        Preprocessed DWI from dwifslpreproc (eddy-corrected)
+    eddy_output_dir : Path
+        Directory containing eddy outputs (dwi_post_eddy.nii.gz and dfields/)
+    anat_ref_image : Path
+        Anatomical reference image (e.g., T1w, MTsat)
+    output_dir : Path
+        Output directory for registered DWI and intermediate files
+    brain_mask : Path, optional
+        Brain mask for tensor fitting (if None, will create one)
+    nthreads : int
+        Number of threads (0=all available)
+
+    Returns
+    -------
+    tuple[Path, Path]
+        (registered DWI path, brain mask path)
+    """
+    import os
+
+    if nthreads == 0:
+        nthreads = os.cpu_count() or 1
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reg_dir = output_dir / "reg"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract first volume of dwi_post_eddy with fslroi to preserve
+    # FSL headers (consistent with eddy displacement fields)
+    print("  Extracting first volume from dwi_post_eddy...")
+    eddy_post_vol0 = reg_dir / "dwi_post_eddy_vol0.nii.gz"
+    dwi_post_eddy = eddy_output_dir / "dwi_post_eddy.nii.gz"
+    run_command(f"fslroi {dwi_post_eddy} {eddy_post_vol0} 0 1", verbose=False)
+
+    # Register eddy first vol → anatomical reference (rigid, mutual information)
+    # ANTs threading is controlled via environment variable, not CLI flag
+    print(f"  Registering DWI → anatomical reference (rigid, {nthreads} threads)...")
+    os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(nthreads)
+    reg_prefix = reg_dir / "b0_to_anat"
+    run_command(
+        f"antsRegistration --dimensionality 3 --float 0"
+        f" --output [{reg_prefix}_,{reg_prefix}_Warped.nii.gz]"
+        f" --interpolation Linear"
+        f" --use-histogram-matching 1"
+        f" --initial-moving-transform [{anat_ref_image},{eddy_post_vol0},1]"
+        f" --transform Rigid[0.1]"
+        f" --metric MI[{anat_ref_image},{eddy_post_vol0},1,32,Regular,0.25]"
+        f" --convergence [1000x500x250x100,1e-6,10]"
+        f" --smoothing-sigmas 3x2x1x0vox"
+        f" --shrink-factors 8x4x2x1",
+        verbose=False,
+    )
+    ants_mat = Path(f"{reg_prefix}_0GenericAffine.mat")
+    print(f"    ANTs transform: {ants_mat.name}")
+
+    # Convert ANTs transform → FLIRT format
+    # Use eddy_post_vol0 for both ref and src to keep FSL headers
+    # consistent with the eddy displacement fields in convertwarp
+    print("  Converting ANTs transform to FLIRT format...")
+    flirt_mat = reg_dir / "b0_to_anat_flirt.txt"
+    convert_ants_to_flirt(
+        ants_mat, ref=eddy_post_vol0, src=eddy_post_vol0, output=flirt_mat,
+    )
+
+    # Combine eddy warps + registration in single interpolation
+    # Output is on DWI grid with content aligned to anatomical reference
+    print("  Applying combined warps (eddy + registration)...")
+    dwi_anat = output_dir / f"{preprocessed_dwi.stem.replace('.nii', '')}_anat.nii.gz"
+    combine_and_apply_warps(
+        eddy_output_dir, dwi_anat,
+        postmat=flirt_mat,
+        nprocs=nthreads,
+    )
+
+    # Copy bvecs/bvals to anatomical-space output
+    # combine_and_apply_warps uses eddy_outlier_free_data which has the
+    # pre-recombination volume count (e.g., 264 for -rpe_all).
+    # The preprocessed DWI may have fewer volumes (132 after recombination).
+    # If so, duplicate bvec/bval to match the output volume count.
+    import nibabel as nib
+    import numpy as np
+
+    bvec_src = get_bvec_path(preprocessed_dwi)
+    bval_src = get_bval_path(preprocessed_dwi)
+    n_vols = nib.load(str(dwi_anat)).shape[3]
+    bvecs = np.loadtxt(bvec_src)
+    bvals = np.loadtxt(bval_src)
+    n_grad = bvecs.shape[1] if bvecs.ndim == 2 else 1
+
+    if n_vols == n_grad:
+        shutil.copy(bvec_src, get_bvec_path(dwi_anat))
+        shutil.copy(bval_src, get_bval_path(dwi_anat))
+    elif n_vols == 2 * n_grad:
+        # -rpe_all: same directions acquired twice, duplicate bvec/bval
+        bvecs_dup = np.hstack([bvecs, bvecs])
+        bvals_dup = np.concatenate([bvals, bvals])
+        np.savetxt(get_bvec_path(dwi_anat), bvecs_dup, fmt="%.6f")
+        np.savetxt(get_bval_path(dwi_anat), bvals_dup.reshape(1, -1), fmt="%.0f")
+    else:
+        raise ValueError(
+            f"Volume count mismatch: output has {n_vols} volumes "
+            f"but bvec/bval has {n_grad} entries"
+        )
+    print(f"    Registered DWI: {dwi_anat.name} ({n_vols} volumes)")
+
+    # Brain masking
+    if brain_mask is None:
+        print("  Creating brain mask...")
+        mask_tmp = output_dir / "_mask_tmp"
+        brain_mask = create_brain_mask(dwi_anat, mask_tmp)
+        final_mask = output_dir / "brain_mask.nii.gz"
+        brain_mask.rename(final_mask)
+        shutil.rmtree(mask_tmp, ignore_errors=True)
+        brain_mask = final_mask
+        print(f"    Brain mask: {brain_mask.name}")
+
+    # Create masked DWI
+    masked_dwi = output_dir / f"{dwi_anat.stem.replace('.nii', '')}_masked.nii.gz"
+    run_command(f"mrcalc {dwi_anat} {brain_mask} -mult {masked_dwi} -force", verbose=False)
+    print(f"    Masked DWI: {masked_dwi.name}")
+
+    return dwi_anat, brain_mask
