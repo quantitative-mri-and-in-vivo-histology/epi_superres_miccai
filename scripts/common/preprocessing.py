@@ -354,6 +354,204 @@ def _diag_validity_mask(image: Path, mask: Path, diag_low: float, diag_high: flo
     return valid_mask
 
 
+def _kt_contract_nnnn(kt, n):
+    """Contract kurtosis tensor with a single direction: Σ W_ijkl n_i n_j n_k n_l.
+
+    Parameters
+    ----------
+    kt : ndarray, shape (N, 15)
+        Kurtosis tensor elements (MRtrix ordering)
+    n : ndarray, shape (N, 3)
+        Direction vectors
+
+    Returns
+    -------
+    ndarray, shape (N,)
+    """
+    n1, n2, n3 = n[:, 0], n[:, 1], n[:, 2]
+    # MRtrix KT ordering with combinatorial multiplicities:
+    #  0-2: W_aaaa (×1), 3-8: W_aaab (×4), 9-11: W_aabb (×6), 12-14: W_aabc (×12)
+    return (
+        kt[:, 0]*n1**4 + kt[:, 1]*n2**4 + kt[:, 2]*n3**4
+        + 4*(kt[:, 3]*n1**3*n2 + kt[:, 4]*n1**3*n3
+             + kt[:, 5]*n1*n2**3 + kt[:, 6]*n2**3*n3
+             + kt[:, 7]*n1*n3**3 + kt[:, 8]*n2*n3**3)
+        + 6*(kt[:, 9]*n1**2*n2**2 + kt[:, 10]*n1**2*n3**2
+             + kt[:, 11]*n2**2*n3**2)
+        + 12*(kt[:, 12]*n1**2*n2*n3
+              + kt[:, 13]*n1*n2*n3**2
+              + kt[:, 14]*n1*n2**2*n3)
+    )
+
+
+def _kt_contract_uuvv(kt, u, v):
+    """Contract kurtosis tensor with two direction pairs: Σ W_ijkl u_i u_j v_k v_l.
+
+    Parameters
+    ----------
+    kt : ndarray, shape (N, 15)
+        Kurtosis tensor elements (MRtrix ordering)
+    u, v : ndarray, shape (N, 3)
+        Direction vectors
+
+    Returns
+    -------
+    ndarray, shape (N,)
+    """
+    u1, u2, u3 = u[:, 0], u[:, 1], u[:, 2]
+    v1, v2, v3 = v[:, 0], v[:, 1], v[:, 2]
+    return (
+        # W_aaaa: u_a² v_a²
+        kt[:, 0]*u1**2*v1**2 + kt[:, 1]*u2**2*v2**2 + kt[:, 2]*u3**2*v3**2
+        # W_aaab (×4 perms → 2 u_a² v_a v_b + 2 u_a u_b v_a²)
+        + kt[:, 3]*(2*u1**2*v1*v2 + 2*u1*u2*v1**2)      # W1112: a=1,b=2
+        + kt[:, 4]*(2*u1**2*v1*v3 + 2*u1*u3*v1**2)      # W1113: a=1,b=3
+        + kt[:, 5]*(2*u2**2*v1*v2 + 2*u1*u2*v2**2)      # W1222: a=2,b=1
+        + kt[:, 6]*(2*u2**2*v2*v3 + 2*u2*u3*v2**2)      # W2223: a=2,b=3
+        + kt[:, 7]*(2*u3**2*v1*v3 + 2*u1*u3*v3**2)      # W1333: a=3,b=1
+        + kt[:, 8]*(2*u3**2*v2*v3 + 2*u2*u3*v3**2)      # W2333: a=3,b=2
+        # W_aabb (×6 perms → u_a² v_b² + 4 u_a u_b v_a v_b + u_b² v_a²)
+        + kt[:, 9]*(u1**2*v2**2 + 4*u1*u2*v1*v2 + u2**2*v1**2)    # W1122
+        + kt[:, 10]*(u1**2*v3**2 + 4*u1*u3*v1*v3 + u3**2*v1**2)   # W1133
+        + kt[:, 11]*(u2**2*v3**2 + 4*u2*u3*v2*v3 + u3**2*v2**2)   # W2233
+        # W_aabc (×12 perms → 2 u_a² v_b v_c + 4 u_a u_b v_a v_c
+        #                    + 4 u_a u_c v_a v_b + 2 u_b u_c v_a²)
+        + kt[:, 12]*(2*u1**2*v2*v3 + 4*u1*u2*v1*v3      # W1123: a=1,b=2,c=3
+                     + 4*u1*u3*v1*v2 + 2*u2*u3*v1**2)
+        + kt[:, 13]*(2*u3**2*v1*v2 + 4*u1*u3*v2*v3      # W1233: a=3,b=1,c=2
+                     + 4*u2*u3*v1*v3 + 2*u1*u2*v3**2)
+        + kt[:, 14]*(2*u2**2*v1*v3 + 4*u1*u2*v2*v3      # W1223: a=2,b=1,c=3
+                     + 4*u2*u3*v1*v2 + 2*u1*u3*v2**2)
+    )
+
+
+def _tabesh_F1F2(la, lb, lc):
+    """Compute F1 and F2 coefficients from Tabesh et al. (2011).
+
+    For eigenvalue permutation (la, lb, lc):
+    - F1 is the weight for Ŵ_aaaa (diagonal kurtosis along eigenvector a)
+    - F2 is the weight for Ŵ_bbcc (cross-kurtosis between eigenvectors b,c)
+
+    Parameters
+    ----------
+    la, lb, lc : ndarray, shape (N,)
+        Diffusion tensor eigenvalues (one specific permutation)
+
+    Returns
+    -------
+    F1, F2 : ndarray, shape (N,)
+    """
+    import numpy as np
+    from scipy.special import elliprf, elliprd
+
+    l_sum_sq = (la + lb + lc) ** 2
+    sqrt_lblc = np.sqrt(lb * lc)
+
+    rf = elliprf(la / lb, la / lc, np.ones_like(la))
+    rd = elliprd(la / lb, la / lc, np.ones_like(la))
+
+    # F1 (Tabesh Eq. A1)
+    F1 = (l_sum_sq / (18 * (la - lb) * (la - lc))) * (
+        sqrt_lblc / la * rf
+        + (3*la**2 - la*lb - la*lc - lb*lc) / (3*la*sqrt_lblc) * rd
+        - 1
+    )
+
+    # F2 (Tabesh Eq. A2)
+    F2 = (l_sum_sq / (3 * (lb - lc)**2)) * (
+        (lb + lc) / sqrt_lblc * rf
+        + (2*la - lb - lc) / (3*sqrt_lblc) * rd
+        - 2
+    )
+
+    return F1, F2
+
+
+def _compute_mean_kurtosis(
+    dt_file: Path, kt_file: Path, mask_file: Path, output: Path,
+) -> None:
+    """Compute mean kurtosis (MK) using the Tabesh et al. (2011) analytical formula.
+
+    Closed-form expression using Carlson's elliptic integrals RF and RD.
+    The diffusion tensor is eigendecomposed, the kurtosis tensor is rotated
+    into the eigenvector frame, and MK is computed as a weighted sum of
+    6 rotated kurtosis components (3 diagonal Ŵ_aaaa + 3 cross Ŵ_aabb).
+
+    Reference: Tabesh et al., "Estimation of tensors and tensor-derived
+    measures in diffusional kurtosis imaging", MRM 65:823-836, 2011.
+
+    Parameters
+    ----------
+    dt_file : Path
+        Diffusion tensor (6 volumes, MRtrix order: D11, D22, D33, D12, D13, D23)
+    kt_file : Path
+        Kurtosis tensor (15 volumes, MRtrix order)
+    mask_file : Path
+        Brain mask
+    output : Path
+        Output MK image path
+    """
+    import nibabel as nib
+    import numpy as np
+
+    mask_img = nib.load(str(mask_file))
+    mask_data = mask_img.get_fdata() > 0
+    dt_data = nib.load(str(dt_file)).get_fdata()
+    kt_data = nib.load(str(kt_file)).get_fdata()
+
+    # Extract masked voxels
+    idx = np.where(mask_data)
+    N = len(idx[0])
+    dt_m = dt_data[idx]  # (N, 6)
+    kt_m = kt_data[idx]  # (N, 15)
+
+    # Build symmetric 3×3 diffusion tensor and eigendecompose
+    D = np.zeros((N, 3, 3))
+    D[:, 0, 0] = dt_m[:, 0]
+    D[:, 1, 1] = dt_m[:, 1]
+    D[:, 2, 2] = dt_m[:, 2]
+    D[:, 0, 1] = D[:, 1, 0] = dt_m[:, 3]
+    D[:, 0, 2] = D[:, 2, 0] = dt_m[:, 4]
+    D[:, 1, 2] = D[:, 2, 1] = dt_m[:, 5]
+
+    evals, evecs = np.linalg.eigh(D)  # ascending order
+    evals = np.maximum(evals, 1e-10)  # clamp to positive
+
+    # Eigenvectors: evecs[:, :, k] is the k-th eigenvector
+    e1, e2, e3 = evecs[:, :, 0], evecs[:, :, 1], evecs[:, :, 2]
+
+    # Rotated kurtosis tensor components in eigenvector frame
+    W1111 = _kt_contract_nnnn(kt_m, e1)
+    W2222 = _kt_contract_nnnn(kt_m, e2)
+    W3333 = _kt_contract_nnnn(kt_m, e3)
+    W1122 = _kt_contract_uuvv(kt_m, e1, e2)
+    W1133 = _kt_contract_uuvv(kt_m, e1, e3)
+    W2233 = _kt_contract_uuvv(kt_m, e2, e3)
+
+    # Add relative jitter to eigenvalues to avoid 0/0 in F1/F2 denominators
+    # (degenerate when any two eigenvalues are equal)
+    l1, l2, l3 = evals[:, 0], evals[:, 1], evals[:, 2]
+    eps = 1e-7 * np.maximum((l1 + l2 + l3) / 3, 1e-15)
+    l1, l2, l3 = l1 + 3*eps, l2 + 2*eps, l3 + eps
+
+    # F1, F2 for three permutations (Tabesh Eq. 16)
+    f1_123, f2_123 = _tabesh_F1F2(l1, l2, l3)
+    f1_213, f2_213 = _tabesh_F1F2(l2, l1, l3)
+    f1_321, f2_321 = _tabesh_F1F2(l3, l2, l1)
+
+    # MK = Σ F1 × Ŵ_diag + Σ F2 × Ŵ_cross
+    mk_m = (f1_123 * W1111 + f2_123 * W2233
+            + f1_213 * W2222 + f2_213 * W1133
+            + f1_321 * W3333 + f2_321 * W1122)
+
+    # Place back into volume
+    mk = np.zeros(dt_data.shape[:3], dtype=np.float64)
+    mk[idx] = mk_m
+
+    mk_img = nib.Nifti1Image(mk.astype(np.float32), mask_img.affine)
+    nib.save(mk_img, str(output))
+
+
 def _threshold_metric(image: Path, low: float, high: float | None = None) -> None:
     """Zero out voxels outside [low, high] range (in-place).
 
@@ -468,9 +666,10 @@ def fit_tensors(dwi: Path, output_prefix: Path, mask: Path) -> dict[str, Path]:
     cmd = f"tensor2metric {dki_d} -force -fa {dki_fa} -adc {dki_md}"
     run_command(cmd, verbose=False)
 
-    # Compute mean kurtosis from kurtosis tensor
+    # Compute mean kurtosis via directional averaging over the unit sphere
+    print("    Computing mean kurtosis...")
     dki_mk = Path(f"{output_prefix}_dki_mk.nii.gz")
-    run_command(f"mrmath {dki_k} mean -axis 3 {dki_mk} -force", verbose=False)
+    _compute_mean_kurtosis(dki_d, dki_k, mask, dki_mk)
 
     print("    Filtering DKI metrics...")
     _threshold_metric(dki_fa, 0, 1)
