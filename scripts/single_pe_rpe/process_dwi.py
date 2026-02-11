@@ -180,6 +180,33 @@ def process_single_mode(
         anat_output_prefix = dwi_dir / dwi_anat.stem.replace(".nii", "")
         fit_tensors(dwi_anat, anat_output_prefix, anat_mask)
 
+        # Step 6: Tissue segmentation using multi-channel Atropos (FA + S0)
+        print(f"  Step 6: Tissue segmentation (ANTs Atropos, multi-channel)...")
+        anat_fa = Path(f"{anat_output_prefix}_dti_fa.nii.gz")
+        anat_s0 = Path(f"{anat_output_prefix}_dti_s0.nii.gz")
+
+        if anat_fa.exists() and anat_s0.exists():
+            seg_path = dwi_dir / f"{anat_output_prefix.name}_segmentation.nii.gz"
+            prob_prefix = str(dwi_dir / f"{anat_output_prefix.name}_segmentation_prob")
+
+            # Multi-channel Atropos: combine FA (tissue contrast) + S0 (T2-weighted contrast)
+            # Use multiple -a flags for multi-channel input
+            cmd = [
+                "Atropos",
+                "-d", "3",
+                "-a", str(anat_fa),              # Channel 1: FA (tissue contrast)
+                "-a", str(anat_s0),              # Channel 2: S0 (T2-weighted contrast)
+                "-x", str(anat_mask),
+                "-i", "KMeans[3]",               # 3-tissue k-means initialization
+                "-c", "[5,0]",                   # 5 iterations, no partial volume
+                "-m", "[0.1,1x1x1]",             # MRF smoothing (weight=0.1, radius=1)
+                "-o", f"[{seg_path},{prob_prefix}_%02d.nii.gz]"
+            ]
+            run_command(cmd, verbose=False)
+            print(f"    Segmentation: {seg_path.name}")
+        else:
+            print(f"    Skipping segmentation: FA or S0 not found")
+
     print(f"  ✓ Completed {mode} mode")
     print()
 
