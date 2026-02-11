@@ -496,8 +496,20 @@ def _compute_mean_kurtosis(
 
     mask_img = nib.load(str(mask_file))
     mask_data = mask_img.get_fdata() > 0
-    dt_data = nib.load(str(dt_file)).get_fdata()
-    kt_data = nib.load(str(kt_file)).get_fdata()
+    dt_img = nib.load(str(dt_file))
+    kt_img = nib.load(str(kt_file))
+    dt_data = dt_img.get_fdata()
+    kt_data = kt_img.get_fdata()
+
+    # Dimension check
+    if mask_data.shape != dt_data.shape[:3]:
+        raise ValueError(
+            f"Mask shape {mask_data.shape} doesn't match tensor spatial dims {dt_data.shape[:3]}\n"
+            f"  Mask file: {mask_file}\n"
+            f"  DT file: {dt_file}\n"
+            f"  Mask affine:\n{mask_img.affine}\n"
+            f"  DT affine:\n{dt_img.affine}"
+        )
 
     # Extract masked voxels
     idx = np.where(mask_data)
@@ -701,6 +713,8 @@ def register_to_anat_ref(
     anat_ref_image: Path,
     output_dir: Path,
     brain_mask: Path | None = None,
+    anat_mask_image: Path | None = None,
+    dwi_mask: Path | None = None,
     nthreads: int = 0,
 ) -> tuple[Path, Path]:
     """Register DWI to anatomical reference with single-interpolation warp combination.
@@ -720,6 +734,10 @@ def register_to_anat_ref(
         Output directory for registered DWI and intermediate files
     brain_mask : Path, optional
         Brain mask for tensor fitting (if None, will create one)
+    anat_mask_image : Path, optional
+        Anatomical brain mask to regrid and use (instead of creating from DWI)
+    dwi_mask : Path, optional
+        DWI brain mask to use for masked registration
     nthreads : int
         Number of threads (0=all available)
 
@@ -748,14 +766,63 @@ def register_to_anat_ref(
     print(f"  Registering DWI → anatomical reference (rigid, {nthreads} threads)...")
     os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(nthreads)
     reg_prefix = reg_dir / "b0_to_anat"
+
+    # Apply masks directly to images before registration if available
+    anat_for_reg = anat_ref_image
+    dwi_for_reg = eddy_post_vol0
+
+    if anat_mask_image is not None and dwi_mask is not None:
+        print(f"    Masking images for registration")
+
+        # Regrid anatomical mask to match anatomical reference
+        anat_mask_reg = reg_dir / "anat_mask_for_reg.nii.gz"
+        run_command(
+            f"mrtransform {anat_mask_image} -template {anat_ref_image} "
+            f"-interp nearest {anat_mask_reg} -force",
+            verbose=False,
+        )
+        run_command(
+            f"mrconvert {anat_mask_reg} -strides {anat_ref_image} {anat_mask_reg} -force",
+            verbose=False,
+        )
+
+        # Regrid DWI mask to match eddy_post_vol0
+        dwi_mask_reg = reg_dir / "dwi_mask_for_reg.nii.gz"
+        run_command(
+            f"mrtransform {dwi_mask} -template {eddy_post_vol0} "
+            f"-interp nearest {dwi_mask_reg} -force",
+            verbose=False,
+        )
+        run_command(
+            f"mrconvert {dwi_mask_reg} -strides {eddy_post_vol0} {dwi_mask_reg} -force",
+            verbose=False,
+        )
+
+        # Create masked anatomical reference
+        anat_masked = reg_dir / "anat_masked.nii.gz"
+        run_command(
+            f"mrcalc {anat_ref_image} {anat_mask_reg} -mult {anat_masked} -force",
+            verbose=False,
+        )
+
+        # Create masked DWI
+        dwi_masked = reg_dir / "dwi_masked.nii.gz"
+        run_command(
+            f"mrcalc {eddy_post_vol0} {dwi_mask_reg} -mult {dwi_masked} -force",
+            verbose=False,
+        )
+
+        anat_for_reg = anat_masked
+        dwi_for_reg = dwi_masked
+
     run_command(
         f"antsRegistration --dimensionality 3 --float 0"
         f" --output [{reg_prefix}_,{reg_prefix}_Warped.nii.gz]"
         f" --interpolation Linear"
-        f" --use-histogram-matching 1"
-        f" --initial-moving-transform [{anat_ref_image},{eddy_post_vol0},1]"
+        f" --use-histogram-matching 0"
+        f" --initial-moving-transform [{anat_for_reg},{dwi_for_reg},1]"
         f" --transform Rigid[0.1]"
-        f" --metric MI[{anat_ref_image},{eddy_post_vol0},1,32,Regular,0.25]"
+        f" --metric MI[{anat_for_reg},{dwi_for_reg},1,32,Regular,0.25]"
         f" --convergence [1000x500x250x100,1e-6,10]"
         f" --smoothing-sigmas 3x2x1x0vox"
         f" --shrink-factors 8x4x2x1",
@@ -816,14 +883,33 @@ def register_to_anat_ref(
 
     # Brain masking
     if brain_mask is None:
-        print("  Creating brain mask...")
-        mask_tmp = output_dir / "_mask_tmp"
-        brain_mask = create_brain_mask(dwi_anat, mask_tmp)
-        final_mask = output_dir / "brain_mask.nii.gz"
-        brain_mask.rename(final_mask)
-        shutil.rmtree(mask_tmp, ignore_errors=True)
-        brain_mask = final_mask
-        print(f"    Brain mask: {brain_mask.name}")
+        if anat_mask_image is not None and anat_mask_image.exists():
+            # Regrid anatomical mask to match registered DWI
+            print("  Regridding anatomical mask to registered DWI space...")
+            final_mask = output_dir / "brain_mask.nii.gz"
+            mask_tmp = output_dir / "_tmp_mask_anat.nii.gz"
+            run_command(
+                f"mrtransform {anat_mask_image} -template {dwi_anat} "
+                f"-interp nearest {mask_tmp} -force",
+                verbose=False,
+            )
+            run_command(
+                f"mrconvert {mask_tmp} -strides {dwi_anat} {final_mask} -force",
+                verbose=False,
+            )
+            mask_tmp.unlink(missing_ok=True)
+            brain_mask = final_mask
+            print(f"    Brain mask (from anat): {final_mask.name}")
+        else:
+            # Create brain mask from registered DWI
+            print("  Creating brain mask from registered DWI...")
+            mask_tmp = output_dir / "_mask_tmp"
+            brain_mask = create_brain_mask(dwi_anat, mask_tmp)
+            final_mask = output_dir / "brain_mask.nii.gz"
+            brain_mask.rename(final_mask)
+            shutil.rmtree(mask_tmp, ignore_errors=True)
+            brain_mask = final_mask
+            print(f"    Brain mask (from DWI): {final_mask.name}")
 
     # Create masked DWI
     masked_dwi = output_dir / f"{dwi_anat.stem.replace('.nii', '')}_masked.nii.gz"

@@ -74,6 +74,7 @@ def process_single_mode(
     mode: str,
     nthreads: int = 0,
     anat_ref_image: Path | None = None,
+    anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
@@ -92,6 +93,8 @@ def process_single_mode(
         Number of threads for topup
     anat_ref_image : Path, optional
         Anatomical reference image for registration (e.g., MTsat)
+    anat_mask_image : Path, optional
+        Anatomical brain mask to regrid and use (instead of creating from DWI)
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     """
@@ -114,16 +117,40 @@ def process_single_mode(
 
     # Step 2: Brain masking
     print(f"  Step 2: Brain masking...")
-    mask_tmp = dwi_dir / f"_mask_tmp_{mode}"
-    brain_mask = create_brain_mask(preprocessed, mask_tmp)
-
-    # Rename to match preprocessed filename
     prefix = preprocessed.stem.replace(".nii", "")
     final_mask = dwi_dir / f"{prefix}_brain_mask.nii.gz"
-    brain_mask.rename(final_mask)
-    shutil.rmtree(mask_tmp, ignore_errors=True)
 
-    print(f"    Brain mask: {final_mask.name}")
+    if anat_mask_image is not None and anat_mask_image.exists():
+        # Regrid and reorient anatomical mask to match preprocessed DWI exactly
+        print(f"    Regridding anatomical mask: {anat_mask_image.name}")
+
+        # Transform mask to match preprocessed DWI template (geometry + strides)
+        # Using -template alone doesn't guarantee stride matching, so we also
+        # explicitly copy the DWI strides to ensure nibabel loads them identically
+        mask_tmp = dwi_dir / f"_tmp_mask_{mode}.nii.gz"
+        run_command(
+            f"mrtransform {anat_mask_image} -template {preprocessed} "
+            f"-interp nearest {mask_tmp} -force",
+            verbose=False,
+        )
+
+        # Force mask to have identical strides as preprocessed DWI
+        run_command(
+            f"mrconvert {mask_tmp} -strides {preprocessed} {final_mask} -force",
+            verbose=False,
+        )
+
+        # Clean up
+        mask_tmp.unlink(missing_ok=True)
+
+        print(f"    Brain mask (from anat): {final_mask.name}")
+    else:
+        # Create brain mask from DWI
+        mask_tmp = dwi_dir / f"_mask_tmp_{mode}"
+        brain_mask = create_brain_mask(preprocessed, mask_tmp)
+        brain_mask.rename(final_mask)
+        shutil.rmtree(mask_tmp, ignore_errors=True)
+        print(f"    Brain mask (from DWI): {final_mask.name}")
 
     # Create masked DWI
     masked_dwi = dwi_dir / f"{prefix}_masked.nii.gz"
@@ -144,6 +171,8 @@ def process_single_mode(
             eddy_output_dir=eddy_dir,
             anat_ref_image=anat_ref_image,
             output_dir=dwi_dir,
+            anat_mask_image=anat_mask_image,
+            dwi_mask=final_mask,
             nthreads=nthreads,
         )
 
@@ -161,6 +190,7 @@ def process_dwi_pair(
     dwi_dir: Path,
     nthreads: int = 0,
     anat_ref_image: Path | None = None,
+    anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
 ) -> None:
     """Process one pair of DWI files with both b0_rpe and full_rpe modes.
@@ -177,6 +207,8 @@ def process_dwi_pair(
         Number of threads for topup
     anat_ref_image : Path, optional
         Anatomical reference image for registration
+    anat_mask_image : Path, optional
+        Anatomical brain mask to regrid and use
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     """
@@ -185,8 +217,8 @@ def process_dwi_pair(
     print()
 
     # Process with both mode
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, skip_preproc=skip_preproc)
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, skip_preproc=skip_preproc)
+    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
 
     print(f"  ✓ Completed all modes for: {dwi.name}")
 
@@ -216,6 +248,7 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
     # Always use the native res mpm/ directory — the 1.6mm MTsat is the
     # reference for both native and downsampled DWI resolutions.
     anat_ref_image = None
+    anat_mask_image = None
     mpm_dir = subject_dir / "mpm"
     if not mpm_dir.is_dir():
         # Fall back to native res mpm/ for downsampled subjects
@@ -229,6 +262,14 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
         else:
             print(f"  No MTsat_downsampled found in {mpm_dir}")
 
+        # Find anatomical brain mask
+        mask_files = list(mpm_dir.glob("brain_mask.nii.gz"))
+        if mask_files:
+            anat_mask_image = mask_files[0]
+            print(f"  Found anatomical mask: {anat_mask_image}")
+        else:
+            print(f"  No brain_mask.nii.gz found in {mpm_dir}")
+
     # Find PE pairs
     pe_pairs = find_pe_pairs(dwi_dir)
 
@@ -240,7 +281,7 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
 
     for dwi, dwi_rpe in pe_pairs:
         try:
-            process_dwi_pair(dwi, dwi_rpe, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, skip_preproc=skip_preproc)
+            process_dwi_pair(dwi, dwi_rpe, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
         except Exception as e:
             print(f"  ERROR: Failed to process {dwi.name}: {e}")
             continue
