@@ -186,6 +186,9 @@ def run_dwifslpreproc(
 
     # Eddy output directory (persisted after processing)
     eddy_output_dir = output_dir / f"{output_name.replace('.nii.gz', '')}_eddy_output"
+    # Remove existing eddy output directory to avoid file conflicts
+    if eddy_output_dir.exists():
+        shutil.rmtree(eddy_output_dir)
     eddy_output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
