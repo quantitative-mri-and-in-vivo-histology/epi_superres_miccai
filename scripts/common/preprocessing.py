@@ -618,13 +618,43 @@ def fit_tensors(dwi: Path, output_prefix: Path, mask: Path) -> dict[str, Path]:
 
     outputs = {}
 
-    # DTI
-    print("    Fitting DTI...")
+    # DTI - extract only b < 1700 for fitting (DTI assumes Gaussian diffusion)
+    print("    Fitting DTI (b < 1700)...")
+    import numpy as np
+
+    # Determine which shells to keep (b < 1700)
+    bvals = np.loadtxt(bval)
+    unique_bvals = np.unique(np.round(bvals / 100) * 100)  # Round to nearest 100
+    low_b_shells = unique_bvals[unique_bvals < 1700]
+    shells_str = ",".join(str(int(b)) for b in low_b_shells)
+
+    # Extract low-b shells for DTI
+    dwi_dti = tmp_dir / "dwi_for_dti.nii.gz"
+    bval_dti = tmp_dir / "dwi_for_dti.bval"
+    bvec_dti = tmp_dir / "dwi_for_dti.bvec"
+
+    run_command(
+        f"dwiextract {dwi} {dwi_dti}"
+        f" -shells {shells_str}"
+        f" -fslgrad {bvec} {bval}"
+        f" -export_grad_fsl {bvec_dti} {bval_dti}"
+        f" -force",
+        verbose=False,
+    )
+
+    n_vols_dti = len(np.loadtxt(bval_dti))
+    print(f"      Using {n_vols_dti}/{len(bvals)} volumes (shells: {shells_str})")
+
     dti_d = Path(f"{output_prefix}_dti_d.nii.gz")
     dti_s0 = Path(f"{output_prefix}_dti_s0.nii.gz")
 
-    cmd = f"dwi2tensor {dwi} {dti_d} -force -fslgrad {bvec} {bval} -iter 10 -mask {mask} -b0 {dti_s0}"
+    cmd = f"dwi2tensor {dwi_dti} {dti_d} -force -fslgrad {bvec_dti} {bval_dti} -iter 10 -mask {mask} -b0 {dti_s0}"
     run_command(cmd, verbose=False)
+
+    # Clean up DTI temp files
+    dwi_dti.unlink(missing_ok=True)
+    bval_dti.unlink(missing_ok=True)
+    bvec_dti.unlink(missing_ok=True)
 
     print("    Cleaning diffusion tensor...")
     dt_valid = _diag_validity_mask(dti_d, mask, diag_low=0, diag_high=0.003, tmp_dir=tmp_dir)
