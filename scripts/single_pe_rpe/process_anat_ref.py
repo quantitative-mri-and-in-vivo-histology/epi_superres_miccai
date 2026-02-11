@@ -24,7 +24,7 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
 
     Pipeline:
     1. Brain extraction (FSL BET)
-    2. Tissue segmentation (FSL FAST): 1=CSF, 2=GM, 3=WM
+    2. Tissue segmentation (ANTs Atropos): 1=CSF, 2=GM, 3=WM
 
     Parameters
     ----------
@@ -53,16 +53,22 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
     bet_mask_path.rename(brain_mask_path)
     print(f"    Saved brain mask: {brain_mask_path.name}")
 
-    # Tissue segmentation with FSL FAST (1=CSF, 2=GM, 3=WM)
-    print("  Tissue segmentation (FSL FAST)...")
-    fast_prefix = str(output_dir / "fast")
-
-    cmd = ["fast", "-o", fast_prefix, str(brain_path)]
-    run_command(cmd, verbose=False)
-
-    # FAST outputs: fast_seg.nii.gz, fast_pve_0/1/2.nii.gz, etc.
+    # Tissue segmentation with ANTs Atropos (1=CSF, 2=GM, 3=WM)
+    print("  Tissue segmentation (ANTs Atropos)...")
     seg_path = output_dir / "segmentation.nii.gz"
-    Path(f"{fast_prefix}_seg.nii.gz").rename(seg_path)
+    prob_prefix = str(output_dir / "segmentation_prob")
+
+    cmd = [
+        "Atropos",
+        "-d", "3",
+        "-a", str(brain_path),
+        "-x", str(brain_mask_path),
+        "-i", "KMeans[3]",        # 3-tissue k-means initialization
+        "-c", "[5,0]",             # 5 iterations, no partial volume
+        "-m", "[0.1,1x1x1]",       # MRF smoothing (weight=0.1, radius=1)
+        "-o", f"[{seg_path},{prob_prefix}_%02d.nii.gz]"
+    ]
+    run_command(cmd, verbose=False)
     print(f"    Saved segmentation: {seg_path.name}")
 
     # Clean up intermediate brain-extracted image
@@ -147,7 +153,8 @@ def process_subject(subject_dir: Path, target_voxel: float):
         dst_name = f"{stem}{suffix}.nii.gz"
         dst_path = mpm_dir / dst_name
 
-        interp = "nearest" if "mask" in key else "sinc"
+        # Use nearest-neighbor for masks and segmentations (label maps)
+        interp = "nearest" if ("mask" in key or "segmentation" in key) else "sinc"
         print(f"    {src_path.name} ({interp}) -> {dst_name}")
         downsample_image(src_path, dst_path, target_voxel, interp=interp)
 
