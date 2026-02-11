@@ -15,9 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 RAW_DIR = ROOT / "data/single_pe_rpe/native_res/processed"
 OUTPUT_DIR = ROOT / "data/single_pe_rpe/downsampled_2p5mm/processed"
 
-NATIVE_RES = 1.6  # mm
-TARGET_RES = 2.5  # mm
-SCALE_FACTOR = NATIVE_RES / TARGET_RES  # 0.64
+NATIVE_RES = 1.6  # mm (slice direction, unchanged)
+TARGET_RES = 2.5  # mm (in-plane, downsampled)
 
 
 def downsample_dwi(input_dwi: Path, output_dwi: Path) -> None:
@@ -32,9 +31,11 @@ def downsample_dwi(input_dwi: Path, output_dwi: Path) -> None:
     """
     output_dwi.parent.mkdir(parents=True, exist_ok=True)
 
+    # Use -voxel to specify exact voxel size in mm (not -scale which scales matrix)
+    # Format: X,Y,Z where Y is slice direction (kept at native res)
     cmd = [
         "mrgrid", str(input_dwi), "regrid", str(output_dwi),
-        "-scale", f"{SCALE_FACTOR},1,{SCALE_FACTOR}",
+        "-voxel", f"{TARGET_RES},{NATIVE_RES},{TARGET_RES}",
         "-interp", "sinc",
         "-force"
     ]
@@ -136,7 +137,6 @@ def main():
                       if d.is_dir() and d.name.startswith("sub-")])
 
     print(f"Downsampling DWI from {NATIVE_RES}mm to {TARGET_RES}mm in-plane")
-    print(f"Scale factor: {SCALE_FACTOR:.3f}")
     print(f"Found {len(subjects)} subject(s)")
     print()
 
