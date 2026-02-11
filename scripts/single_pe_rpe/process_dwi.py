@@ -312,21 +312,21 @@ def main():
     print("=" * 60)
     print()
 
-    # Process native resolution
-    if NATIVE_BASE.is_dir():
-        subjects = sorted([d for d in NATIVE_BASE.iterdir()
-                          if d.is_dir() and d.name.startswith("sub-")])
+    # # Process native resolution
+    # if NATIVE_BASE.is_dir():
+    #     subjects = sorted([d for d in NATIVE_BASE.iterdir()
+    #                       if d.is_dir() and d.name.startswith("sub-")])
 
-        print(f"Native resolution (1.6mm): {len(subjects)} subject(s)")
-        print()
+    #     print(f"Native resolution (1.6mm): {len(subjects)} subject(s)")
+    #     print()
 
-        for subject_dir in subjects:
-            print(f"=== {subject_dir.name} [native 1.6mm] ===")
-            try:
-                process_subject(subject_dir, "native 1.6mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
-            except Exception as e:
-                print(f"  ERROR: {e}")
-            print()
+    #     for subject_dir in subjects:
+    #         print(f"=== {subject_dir.name} [native 1.6mm] ===")
+    #         try:
+    #             process_subject(subject_dir, "native 1.6mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
+    #         except Exception as e:
+    #             print(f"  ERROR: {e}")
+    #         print()
 
     # Process downsampled resolution
     if DOWNSAMPLED_BASE.is_dir():

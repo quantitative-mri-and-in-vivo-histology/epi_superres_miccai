@@ -844,12 +844,14 @@ def register_to_anat_ref(
     )
 
     # Combine eddy warps + registration in single interpolation
-    # Output is on DWI grid with content aligned to anatomical reference
+    # Output matches anatomical reference voxel size and grid
+    # Using MRtrix mrtransform handles stride order correctly
     print("  Applying combined warps (eddy + registration)...")
     dwi_anat = output_dir / f"{preprocessed_dwi.stem.replace('.nii', '')}_anat.nii.gz"
     combine_and_apply_warps(
         eddy_output_dir, dwi_anat,
         postmat=flirt_mat,
+        ref_image=anat_ref_image,
         nprocs=nthreads,
     )
 

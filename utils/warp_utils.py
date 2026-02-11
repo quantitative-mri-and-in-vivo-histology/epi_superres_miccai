@@ -49,16 +49,20 @@ def _process_volume(args: tuple) -> None:
     Parameters
     ----------
     args : tuple
-        (vol_file, dfield_file, comb_warp_file, jac_file, warped_file, postmat)
+        (vol_file, dfield_file, comb_warp_file, jac_file, warped_file, postmat, ref_image)
     """
-    vol_file, dfield_file, comb_warp_file, jac_file, warped_file, postmat = args
+    vol_file, dfield_file, comb_warp_file, jac_file, warped_file, postmat, ref_image = args
+
+    # Determine reference space for output
+    # If ref_image is provided, output will match that space (e.g., anatomical reference)
+    # Otherwise, output stays on input volume grid
+    reference = ref_image if ref_image is not None else vol_file
 
     # Combine warps: eddy displacement field + optional affine postmat
-    # Reference is always the input volume (matching eddy dfield grid)
     cmd = (
         f"convertwarp"
         f" -o {comb_warp_file}"
-        f" -r {vol_file}"
+        f" -r {reference}"
         f" -j {jac_file}"
         f" --warp1={dfield_file}"
     )
@@ -66,14 +70,15 @@ def _process_volume(args: tuple) -> None:
         cmd += f" --postmat={postmat}"
     run_command(cmd, verbose=False)
 
-    # Apply combined warp (output on input volume grid)
+    # Apply combined warp using ANTs antsApplyTransforms instead of FSL applywarp
+    # ANTs handles orientation and stride differences more robustly
     run_command(
-        f"applywarp"
+        f"antsApplyTransforms -d 3"
         f" -i {vol_file}"
-        f" -r {vol_file}"
+        f" -r {reference}"
         f" -o {warped_file}"
-        f" -w {comb_warp_file}"
-        f" --interp=spline",
+        f" -t {comb_warp_file}"
+        f" -n BSpline[3]",
         verbose=False,
     )
 
@@ -88,6 +93,7 @@ def combine_and_apply_warps(
     eddy_output_dir: Path,
     out_file: Path,
     postmat: Path | None = None,
+    ref_image: Path | None = None,
     nprocs: int | None = None,
 ) -> Path:
     """Combine eddy displacement fields with additional transforms and apply.
@@ -97,8 +103,8 @@ def combine_and_apply_warps(
     into a single warp, and applies it with spline interpolation and Jacobian
     modulation. The corrected volumes are merged into a single 4D output.
 
-    Each volume uses itself as the convertwarp/applywarp reference, matching
-    the grid on which the eddy displacement fields are defined.
+    The output grid is determined by ref_image (if provided) or the input
+    DWI volumes (if not).
 
     Parameters
     ----------
@@ -110,6 +116,10 @@ def combine_and_apply_warps(
     postmat : Path, optional
         FLIRT-format affine transform to apply after eddy correction
         (e.g., DWI-to-T1w rigid registration from ``convert_ants_to_flirt``)
+    ref_image : Path, optional
+        Reference image defining the output space (voxel size and grid).
+        If provided, output will match this reference (e.g., anatomical image).
+        If None, output stays on the DWI grid.
     nprocs : int, optional
         Number of parallel processes. Defaults to number of physical CPUs.
 
@@ -162,6 +172,7 @@ def combine_and_apply_warps(
             str(comb_warp_dir / f"jac_{i:04d}.nii.gz"),
             str(warp_dir / f"warped_{i:04d}.nii.gz"),
             str(postmat) if postmat is not None else None,
+            str(ref_image) if ref_image is not None else None,
         ))
 
     # Process volumes in parallel
