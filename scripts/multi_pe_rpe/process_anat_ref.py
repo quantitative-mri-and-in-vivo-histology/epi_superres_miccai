@@ -109,6 +109,17 @@ def brain_extract_and_segment(mprage_path: Path, output_dir: Path) -> dict[str, 
     run_command(cmd, verbose=False)
     print(f"    Saved segmentation: {seg_path.name}")
 
+    # Rename probability maps to meaningful names (1=CSF, 2=GM, 3=WM)
+    prob_csf = output_dir / "segmentation_prob_csf.nii.gz"
+    prob_gm = output_dir / "segmentation_prob_gm.nii.gz"
+    prob_wm = output_dir / "segmentation_prob_wm.nii.gz"
+
+    Path(f"{prob_prefix}_01.nii.gz").rename(prob_csf)
+    Path(f"{prob_prefix}_02.nii.gz").rename(prob_gm)
+    Path(f"{prob_prefix}_03.nii.gz").rename(prob_wm)
+
+    print(f"    Saved probability maps: {prob_csf.name}, {prob_gm.name}, {prob_wm.name}")
+
     # Clean up intermediate brain-extracted image
     if brain_path.exists():
         brain_path.unlink()
@@ -117,6 +128,9 @@ def brain_extract_and_segment(mprage_path: Path, output_dir: Path) -> dict[str, 
         "mprage": mprage_corrected_path,
         "brain_mask": brain_mask_path,
         "segmentation": seg_path,
+        "prob_csf": prob_csf,
+        "prob_gm": prob_gm,
+        "prob_wm": prob_wm,
     }
 
 

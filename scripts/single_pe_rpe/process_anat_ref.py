@@ -23,7 +23,7 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
     """Brain extraction and tissue segmentation using MTsat map.
 
     Pipeline:
-    1. Brain extraction (FSL BET)
+    1. Brain extraction (ANTs)
     2. Tissue segmentation (ANTs Atropos): 1=CSF, 2=GM, 3=WM
 
     Parameters
@@ -40,17 +40,36 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Brain extraction with FSL BET
-    print("  Brain extraction (FSL BET)...")
+    # Brain extraction with ANTs using MNI template
+    print("  Brain extraction (ANTs)...")
     brain_path = output_dir / "mtsat_brain.nii.gz"
     brain_mask_path = output_dir / "brain_mask.nii.gz"
 
-    cmd = ["bet", str(mtsat_path), str(brain_path), "-m", "-R"]
+    template_path = ROOT / "data/templates/MNI152_T1_1mm.nii.gz"
+    template_mask_path = ROOT / "data/templates/MNI152_T1_1mm_brain_mask.nii.gz"
+    brain_extraction_prefix = output_dir / "ants_brain_extraction_"
+
+    cmd = [
+        "antsBrainExtraction.sh",
+        "-d", "3",
+        "-a", str(mtsat_path),
+        "-e", str(template_path),
+        "-m", str(template_mask_path),
+        "-o", str(brain_extraction_prefix)
+    ]
     run_command(cmd, verbose=False)
 
-    # BET writes mask as <output>_mask.nii.gz
-    bet_mask_path = output_dir / "mtsat_brain_mask.nii.gz"
-    bet_mask_path.rename(brain_mask_path)
+    # antsBrainExtraction.sh outputs:
+    # - {prefix}BrainExtractionMask.nii.gz (brain mask)
+    # - {prefix}BrainExtractionBrain.nii.gz (brain extracted image)
+    ants_mask = Path(f"{brain_extraction_prefix}BrainExtractionMask.nii.gz")
+    ants_brain = Path(f"{brain_extraction_prefix}BrainExtractionBrain.nii.gz")
+
+    if ants_mask.exists():
+        ants_mask.rename(brain_mask_path)
+    if ants_brain.exists():
+        ants_brain.rename(brain_path)
+
     print(f"    Saved brain mask: {brain_mask_path.name}")
 
     # Tissue segmentation with ANTs Atropos (1=CSF, 2=GM, 3=WM)
@@ -71,6 +90,17 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
     run_command(cmd, verbose=False)
     print(f"    Saved segmentation: {seg_path.name}")
 
+    # Rename probability maps to meaningful names (1=CSF, 2=GM, 3=WM)
+    prob_csf = output_dir / "segmentation_prob_csf.nii.gz"
+    prob_gm = output_dir / "segmentation_prob_gm.nii.gz"
+    prob_wm = output_dir / "segmentation_prob_wm.nii.gz"
+
+    Path(f"{prob_prefix}_01.nii.gz").rename(prob_csf)
+    Path(f"{prob_prefix}_02.nii.gz").rename(prob_gm)
+    Path(f"{prob_prefix}_03.nii.gz").rename(prob_wm)
+
+    print(f"    Saved probability maps: {prob_csf.name}, {prob_gm.name}, {prob_wm.name}")
+
     # Clean up intermediate brain-extracted image
     if brain_path.exists():
         brain_path.unlink()
@@ -78,6 +108,9 @@ def brain_extract_and_segment(mtsat_path: Path, output_dir: Path) -> dict[str, P
     return {
         "brain_mask": brain_mask_path,
         "segmentation": seg_path,
+        "prob_csf": prob_csf,
+        "prob_gm": prob_gm,
+        "prob_wm": prob_wm,
     }
 
 

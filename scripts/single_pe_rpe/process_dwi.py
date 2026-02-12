@@ -204,6 +204,17 @@ def process_single_mode(
             ]
             run_command(cmd, verbose=False)
             print(f"    Segmentation: {seg_path.name}")
+
+            # Rename probability maps to meaningful names (1=CSF, 2=GM, 3=WM)
+            prob_csf = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_csf.nii.gz"
+            prob_gm = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_gm.nii.gz"
+            prob_wm = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_wm.nii.gz"
+
+            Path(f"{prob_prefix}_01.nii.gz").rename(prob_csf)
+            Path(f"{prob_prefix}_02.nii.gz").rename(prob_gm)
+            Path(f"{prob_prefix}_03.nii.gz").rename(prob_wm)
+
+            print(f"    Probability maps: {prob_csf.name}, {prob_gm.name}, {prob_wm.name}")
         else:
             print(f"    Skipping segmentation: FA or S0 not found")
 
