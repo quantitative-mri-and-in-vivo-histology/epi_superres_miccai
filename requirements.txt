@@ -6,6 +6,7 @@ matplotlib
 scipy
 scikit-image
 pandas
+seaborn
 
 # ANTs and brain extraction - installed separately in Dockerfile with --only-binary
 
