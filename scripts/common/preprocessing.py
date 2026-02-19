@@ -154,7 +154,15 @@ def run_dwifslpreproc(
         output_name = dwi.name.replace("_denoised", "_preprocessed")
     elif mode == "full_rpe":
         # Remove PE direction, indicate merged: *_merged_preprocessed.nii.gz
-        base_name = dwi.name.split("_dir-")[0]  # Everything before _dir-XX
+        if "_dir-" in dwi.name:
+            # single_pe_rpe: sub-V06460_acq-b2000n132_dir-AP_denoised.nii.gz
+            base_name = dwi.name.split("_dir-")[0]  # Everything before _dir-XX
+        else:
+            # multi_pe_rpe: dwi_lr_denoised.nii.gz
+            base_name = dwi.name.replace("_denoised.nii.gz", "").replace("_denoised.nii", "")
+            # Extract just the base without PE direction (dwi_lr -> dwi)
+            if base_name.endswith(("_lr", "_rl", "_ap", "_pa")):
+                base_name = "_".join(base_name.split("_")[:-1])
         output_name = f"{base_name}_merged_preprocessed.nii.gz"
 
     output = output_dir / output_name

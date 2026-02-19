@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Process DWI data for single_pe_rpe dataset.
+"""Process DWI data for multi_pe_rpe dataset.
 
 Full pipeline: dwifslpreproc (topup/eddy) → brain masking → tensor fitting
-Processes both native (1.6mm) and downsampled (2.5mm) resolutions.
+Processes native (1.7mm) and all downsampled resolutions (2.0, 2.5, 3.0, 3.4mm).
+Only processes lr/rl phase encoding pair.
 """
 
 import argparse
@@ -19,62 +20,40 @@ from scripts.common.preprocessing import (create_brain_mask, fit_tensors,
                                           run_dwifslpreproc)
 from utils.cmd_utils import run_command
 
-NATIVE_BASE = ROOT / "data/single_pe_rpe/native_res/processed"
-DOWNSAMPLED_BASE = ROOT / "data/single_pe_rpe/downsampled_2p5mm/processed"
+NATIVE_BASE = ROOT / "data/multi_pe_rpe/native_res/processed"
+DOWNSAMPLED_RESOLUTIONS = [2.0, 2.5, 3.0, 3.4]
 
 
-def find_pe_pairs(dwi_dir: Path) -> list[tuple[Path, Path]]:
-    """Find pairs of denoised DWI files with opposite PE directions.
+def find_lr_rl_pair(dwi_dir: Path) -> tuple[Path, Path] | None:
+    """Find lr and rl denoised DWI files.
 
     Returns
     -------
-    list[tuple[Path, Path]]
-        List of (forward_pe, reverse_pe) tuples
+    tuple[Path, Path] | None
+        (lr, rl) tuple or None if not found
     """
-    denoised_files = sorted(dwi_dir.glob("*_denoised.nii.gz"))
+    lr_file = dwi_dir / "dwi_lr_denoised.nii.gz"
+    rl_file = dwi_dir / "dwi_rl_denoised.nii.gz"
 
-    # Group by base name (everything except dir-XX)
-    from collections import defaultdict
-    groups = defaultdict(list)
-
-    for f in denoised_files:
-        # Extract PE direction from filename (e.g., dir-AP, dir-PA)
-        name = f.name
-        if "_dir-" in name:
-            # Split on _dir- and take everything before it
-            base = name.split("_dir-")[0]
-            groups[base].append(f)
-
-    # Pair up AP/PA (or other opposite PE directions)
-    pairs = []
-    for base, files in groups.items():
-        if len(files) == 2:
-            # Assume first is forward, second is reverse (alphabetically AP < PA)
-            pairs.append((files[0], files[1]))
-
-    return pairs
+    if lr_file.exists() and rl_file.exists():
+        return (lr_file, rl_file)
+    return None
 
 
-def _expected_preproc_paths(dwi: Path, dwi_dir: Path, mode: str) -> tuple[Path, Path]:
+def _expected_preproc_paths(dwi_dir: Path, mode: str) -> tuple[Path, Path]:
     """Compute expected preprocessed DWI and eddy output dir paths for a mode."""
     if mode == "b0_rpe":
-        output_name = dwi.name.replace("_denoised", "_preprocessed")
+        output_name = "dwi_lr_preprocessed.nii.gz"
     else:  # full_rpe mode
-        if "_dir-" in dwi.name:
-            # Extract everything before PE direction
-            base_name = dwi.name.split("_dir-")[0]
-        else:
-            # No PE direction in filename, remove _denoised extension
-            base_name = dwi.name.replace("_denoised.nii.gz", "").replace("_denoised.nii", "")
-        output_name = f"{base_name}_merged_preprocessed.nii.gz"
+        output_name = "dwi_merged_preprocessed.nii.gz"
     preprocessed = dwi_dir / output_name
     eddy_dir = dwi_dir / f"{output_name.replace('.nii.gz', '')}_eddy_output"
     return preprocessed, eddy_dir
 
 
 def process_single_mode(
-    dwi: Path,
-    dwi_rpe: Path,
+    dwi_lr: Path,
+    dwi_rl: Path,
     dwi_dir: Path,
     mode: str,
     nthreads: int = 0,
@@ -86,10 +65,10 @@ def process_single_mode(
 
     Parameters
     ----------
-    dwi : Path
-        Forward PE denoised DWI
-    dwi_rpe : Path
-        Reverse PE denoised DWI
+    dwi_lr : Path
+        LR phase encoding denoised DWI
+    dwi_rl : Path
+        RL phase encoding denoised DWI
     dwi_dir : Path
         DWI directory (for output)
     mode : str
@@ -97,7 +76,7 @@ def process_single_mode(
     nthreads : int
         Number of threads for topup
     anat_ref_image : Path, optional
-        Anatomical reference image for registration (e.g., MTsat)
+        Anatomical reference image for registration (e.g., MPRAGE)
     anat_mask_image : Path, optional
         Anatomical brain mask to regrid and use (instead of creating from DWI)
     skip_preproc : bool
@@ -106,7 +85,7 @@ def process_single_mode(
     print(f"  === Mode: {mode} ===")
 
     if skip_preproc:
-        preprocessed, eddy_dir = _expected_preproc_paths(dwi, dwi_dir, mode)
+        preprocessed, eddy_dir = _expected_preproc_paths(dwi_dir, mode)
         if not preprocessed.exists():
             raise FileNotFoundError(
                 f"--skip-preproc: expected preprocessed DWI at {preprocessed}"
@@ -116,7 +95,7 @@ def process_single_mode(
         # Step 1: Preprocessing (dwifslpreproc)
         print(f"  Step 1: Preprocessing (topup/eddy)...")
         preprocessed, eddy_dir = run_dwifslpreproc(
-            dwi, dwi_rpe, dwi_dir, mode=mode, nthreads=nthreads
+            dwi_lr, dwi_rl, dwi_dir, mode=mode, nthreads=nthreads
         )
         print(f"    Output: {preprocessed.name}")
 
@@ -228,22 +207,22 @@ def process_single_mode(
 
 
 def process_dwi_pair(
-    dwi: Path,
-    dwi_rpe: Path,
+    dwi_lr: Path,
+    dwi_rl: Path,
     dwi_dir: Path,
     nthreads: int = 0,
     anat_ref_image: Path | None = None,
     anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
 ) -> None:
-    """Process one pair of DWI files with both b0_rpe and full_rpe modes.
+    """Process lr/rl DWI pair with both b0_rpe and full_rpe modes.
 
     Parameters
     ----------
-    dwi : Path
-        Forward PE denoised DWI
-    dwi_rpe : Path
-        Reverse PE denoised DWI
+    dwi_lr : Path
+        LR phase encoding denoised DWI
+    dwi_rl : Path
+        RL phase encoding denoised DWI
     dwi_dir : Path
         DWI directory (for output)
     nthreads : int
@@ -255,24 +234,24 @@ def process_dwi_pair(
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     """
-    print(f"  Processing: {dwi.name}")
-    print(f"    Reverse PE: {dwi_rpe.name}")
+    print(f"  Processing: {dwi_lr.name}")
+    print(f"    Reverse PE: {dwi_rl.name}")
     print()
 
-    # Process with both mode
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+    # Process with both modes
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
 
-    print(f"  ✓ Completed all modes for: {dwi.name}")
+    print(f"  ✓ Completed all modes for lr/rl pair")
 
 
-def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False) -> None:
-    """Process all DWI pairs for one subject at one resolution.
+def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False) -> None:
+    """Process DWI data at one resolution.
 
     Parameters
     ----------
-    subject_dir : Path
-        Subject directory (e.g., processed/sub-V06460)
+    dwi_dir : Path
+        DWI directory (e.g., native_res/processed/dwi or downsampled_2p0mm/processed/dwi)
     resolution_name : str
         Resolution identifier (for logging)
     nthreads : int
@@ -280,62 +259,56 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     """
-    subject_id = subject_dir.name
-    dwi_dir = subject_dir / "dwi"
-
     if not dwi_dir.is_dir():
-        print(f"  No dwi/ folder, skipping")
+        print(f"  No dwi/ folder at {dwi_dir}, skipping")
         return
 
-    # Find anatomical reference (1.6mm downsampled MTsat)
-    # Always use the native res mpm/ directory — the 1.6mm MTsat is the
+    # Find anatomical reference (1.7mm downsampled MPRAGE)
+    # Always use the native res anat/ directory — the 1.7mm MPRAGE is the
     # reference for both native and downsampled DWI resolutions.
+    anat_dir = NATIVE_BASE / "anat"
     anat_ref_image = None
     anat_mask_image = None
-    mpm_dir = subject_dir / "mpm"
-    if not mpm_dir.is_dir():
-        # Fall back to native res mpm/ for downsampled subjects
-        mpm_dir = NATIVE_BASE / subject_id / "mpm"
 
-    if mpm_dir.is_dir():
-        mtsat_files = list(mpm_dir.glob(f"{subject_id}_MTsat_downsampled.nii.gz"))
-        if mtsat_files:
-            anat_ref_image = mtsat_files[0]
+    if anat_dir.is_dir():
+        mprage_file = anat_dir / "mprage_downsampled_1p7.nii.gz"
+        if mprage_file.exists():
+            anat_ref_image = mprage_file
             print(f"  Found anatomical reference: {anat_ref_image}")
         else:
-            print(f"  No MTsat_downsampled found in {mpm_dir}")
+            print(f"  No mprage_downsampled_1p7.nii.gz found in {anat_dir}")
 
         # Find anatomical brain mask
-        mask_files = list(mpm_dir.glob("brain_mask.nii.gz"))
-        if mask_files:
-            anat_mask_image = mask_files[0]
+        mask_file = anat_dir / "brain_mask_downsampled_1p7.nii.gz"
+        if mask_file.exists():
+            anat_mask_image = mask_file
             print(f"  Found anatomical mask: {anat_mask_image}")
         else:
-            print(f"  No brain_mask.nii.gz found in {mpm_dir}")
+            print(f"  No brain_mask_downsampled_1p7.nii.gz found in {anat_dir}")
 
-    # Find PE pairs
-    pe_pairs = find_pe_pairs(dwi_dir)
+    # Find lr/rl pair
+    pe_pair = find_lr_rl_pair(dwi_dir)
 
-    if not pe_pairs:
-        print(f"  No PE pairs found, skipping")
+    if not pe_pair:
+        print(f"  No lr/rl pair found, skipping")
         return
 
-    print(f"  Found {len(pe_pairs)} PE pair(s) [{resolution_name}]")
+    dwi_lr, dwi_rl = pe_pair
+    print(f"  Found lr/rl pair [{resolution_name}]")
 
-    for dwi, dwi_rpe in pe_pairs:
-        try:
-            process_dwi_pair(dwi, dwi_rpe, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
-        except Exception as e:
-            print(f"  ERROR: Failed to process {dwi.name}: {e}")
-            continue
+    try:
+        process_dwi_pair(dwi_lr, dwi_rl, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+    except Exception as e:
+        print(f"  ERROR: Failed to process lr/rl pair: {e}")
+        return
 
-        print()
+    print()
 
 
 def main():
-    """Process all subjects at both resolutions."""
+    """Process DWI data at all resolutions."""
     parser = argparse.ArgumentParser(
-        description="Process DWI data for single_pe_rpe dataset"
+        description="Process DWI data for multi_pe_rpe dataset"
     )
     parser.add_argument(
         "--topup-threads",
@@ -350,42 +323,31 @@ def main():
     )
     args = parser.parse_args()
 
-    print("Processing single_pe_rpe DWI data")
+    print("Processing multi_pe_rpe DWI data (lr/rl pair only)")
     print(f"Topup threads: {args.topup_threads}")
     print("=" * 60)
     print()
 
     # Process native resolution
-    if NATIVE_BASE.is_dir():
-        subjects = sorted([d for d in NATIVE_BASE.iterdir()
-                          if d.is_dir() and d.name.startswith("sub-")])
-
-        print(f"Native resolution (1.6mm): {len(subjects)} subject(s)")
+    native_dwi_dir = NATIVE_BASE / "dwi"
+    if native_dwi_dir.is_dir():
+        print(f"=== Native resolution (1.7mm) ===")
+        process_resolution(native_dwi_dir, "native 1.7mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
+    else:
+        print(f"Native DWI directory not found: {native_dwi_dir}")
         print()
 
-        for subject_dir in subjects:
-            print(f"=== {subject_dir.name} [native 1.6mm] ===")
-            try:
-                process_subject(subject_dir, "native 1.6mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
-            except Exception as e:
-                print(f"  ERROR: {e}")
-            print()
+    # # Process downsampled resolutions
+    # for res in DOWNSAMPLED_RESOLUTIONS:
+    #     res_str = str(res).replace(".", "p")
+    #     dwi_dir = ROOT / f"data/multi_pe_rpe/downsampled_{res_str}mm/processed/dwi"
 
-    # Process downsampled resolution
-    if DOWNSAMPLED_BASE.is_dir():
-        subjects = sorted([d for d in DOWNSAMPLED_BASE.iterdir()
-                          if d.is_dir() and d.name.startswith("sub-")])
-
-        print(f"Downsampled resolution (2.5mm): {len(subjects)} subject(s)")
-        print()
-
-        for subject_dir in subjects:
-            print(f"=== {subject_dir.name} [downsampled 2.5mm] ===")
-            try:
-                process_subject(subject_dir, "downsampled 2.5mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
-            except Exception as e:
-                print(f"  ERROR: {e}")
-            print()
+    #     if dwi_dir.is_dir():
+    #         print(f"=== Downsampled resolution ({res}mm) ===")
+    #         process_resolution(dwi_dir, f"downsampled {res}mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
+    #     else:
+    #         print(f"Downsampled DWI directory not found: {dwi_dir}")
+    #         print()
 
     print("=" * 60)
     print("Done.")
