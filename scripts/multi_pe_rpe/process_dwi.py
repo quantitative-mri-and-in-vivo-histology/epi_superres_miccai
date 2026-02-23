@@ -137,28 +137,9 @@ def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, s
         print(f"  No dwi/ folder at {dwi_dir}, skipping")
         return
 
-    # Find anatomical reference (1.7mm downsampled MPRAGE)
-    # Always use the native res anat/ directory — the 1.7mm MPRAGE is the
-    # reference for both native and downsampled DWI resolutions.
-    anat_dir = NATIVE_BASE / "anat"
+    # No anatomical reference for multi_pe_rpe dataset
     anat_ref_image = None
     anat_mask_image = None
-
-    if anat_dir.is_dir():
-        mprage_file = anat_dir / "mprage_downsampled_1p7.nii.gz"
-        if mprage_file.exists():
-            anat_ref_image = mprage_file
-            print(f"  Found anatomical reference: {anat_ref_image}")
-        else:
-            print(f"  No mprage_downsampled_1p7.nii.gz found in {anat_dir}")
-
-        # Find anatomical brain mask
-        mask_file = anat_dir / "brain_mask_downsampled_1p7.nii.gz"
-        if mask_file.exists():
-            anat_mask_image = mask_file
-            print(f"  Found anatomical mask: {anat_mask_image}")
-        else:
-            print(f"  No brain_mask_downsampled_1p7.nii.gz found in {anat_dir}")
 
     # Find lr/rl pair
     pe_pair = find_lr_rl_pair(dwi_dir)

@@ -154,38 +154,15 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     """
-    subject_id = subject_dir.name
     dwi_dir = subject_dir / "dwi"
 
     if not dwi_dir.is_dir():
         print(f"  No dwi/ folder, skipping")
         return
 
-    # Find anatomical reference (1.6mm downsampled MTsat)
-    # Always use the native res mpm/ directory — the 1.6mm MTsat is the
-    # reference for both native and downsampled DWI resolutions.
+    # No anatomical reference for single_pe_rpe dataset
     anat_ref_image = None
     anat_mask_image = None
-    mpm_dir = subject_dir / "mpm"
-    if not mpm_dir.is_dir():
-        # Fall back to native res mpm/ for downsampled subjects
-        mpm_dir = NATIVE_BASE / subject_id / "mpm"
-
-    if mpm_dir.is_dir():
-        mtsat_files = list(mpm_dir.glob(f"{subject_id}_MTsat_downsampled.nii.gz"))
-        if mtsat_files:
-            anat_ref_image = mtsat_files[0]
-            print(f"  Found anatomical reference: {anat_ref_image}")
-        else:
-            print(f"  No MTsat_downsampled found in {mpm_dir}")
-
-        # Find anatomical brain mask
-        mask_files = list(mpm_dir.glob("brain_mask.nii.gz"))
-        if mask_files:
-            anat_mask_image = mask_files[0]
-            print(f"  Found anatomical mask: {anat_mask_image}")
-        else:
-            print(f"  No brain_mask.nii.gz found in {mpm_dir}")
 
     # Find PE pairs
     pe_pairs = find_pe_pairs(dwi_dir)
