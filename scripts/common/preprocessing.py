@@ -185,12 +185,13 @@ def run_dwifslpreproc(
     if readout_time is None:
         raise ValueError(f"Readout time not found in JSON sidecar for {dwi}")
 
-    # Create temp directory
+    # Create temp directory (unique per input file and mode to avoid conflicts)
+    input_stem = dwi.stem.replace('.nii', '')
     if keep_tmp:
-        tmp_dir = output.parent / "tmp"
+        tmp_dir = output.parent / f"tmp_{input_stem}_{mode}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
     else:
-        tmp_dir = Path(tempfile.mkdtemp(prefix="dwifslpreproc_"))
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"{input_stem}_{mode}_"))
 
     # Eddy output directory (persisted after processing)
     eddy_output_dir = output_dir / f"{output_name.replace('.nii.gz', '')}_eddy_output"
