@@ -973,6 +973,7 @@ def process_single_mode(
     skip_preproc: bool = False,
     preprocessed_path: Path | None = None,
     eddy_dir_path: Path | None = None,
+    keep_tmp: bool = False,
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
@@ -1001,6 +1002,8 @@ def process_single_mode(
         Expected path to preprocessed DWI (required if skip_preproc=True)
     eddy_dir_path : Path, optional
         Expected path to eddy output directory (required if skip_preproc=True)
+    keep_tmp : bool
+        Keep temporary directory (contains scratch dir with eddy QC outputs)
     """
     print(f"  === Mode: {mode} ===")
 
@@ -1018,7 +1021,7 @@ def process_single_mode(
         # Step 1: Preprocessing (dwifslpreproc)
         print(f"  Step 1: Preprocessing (topup/eddy)...")
         preprocessed, eddy_dir = run_dwifslpreproc(
-            dwi_forward, dwi_reverse, dwi_dir, mode=mode, nthreads=nthreads
+            dwi_forward, dwi_reverse, dwi_dir, mode=mode, nthreads=nthreads, keep_tmp=keep_tmp
         )
         print(f"    Output: {preprocessed.name}")
 

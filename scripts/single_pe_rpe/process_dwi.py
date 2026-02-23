@@ -75,6 +75,7 @@ def process_single_mode(
     anat_ref_image: Path | None = None,
     anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
+    keep_tmp: bool = False,
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
@@ -98,6 +99,7 @@ def process_single_mode(
         skip_preproc=skip_preproc,
         preprocessed_path=preprocessed_path,
         eddy_dir_path=eddy_dir_path,
+        keep_tmp=keep_tmp,
     )
 
 
@@ -109,6 +111,7 @@ def process_dwi_pair(
     anat_ref_image: Path | None = None,
     anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
+    keep_tmp: bool = False,
 ) -> None:
     """Process one pair of DWI files with both b0_rpe and full_rpe modes.
 
@@ -128,19 +131,21 @@ def process_dwi_pair(
         Anatomical brain mask to regrid and use
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
+    keep_tmp : bool
+        Keep temporary directory (contains scratch dir with eddy QC outputs)
     """
     print(f"  Processing: {dwi.name}")
     print(f"    Reverse PE: {dwi_rpe.name}")
     print()
 
     # Process with both mode
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
-    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+    process_single_mode(dwi, dwi_rpe, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
 
     print(f"  ✓ Completed all modes for: {dwi.name}")
 
 
-def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False) -> None:
+def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False, keep_tmp: bool = False) -> None:
     """Process all DWI pairs for one subject at one resolution.
 
     Parameters
@@ -153,6 +158,8 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
         Number of threads for topup
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
+    keep_tmp : bool
+        Keep temporary directory (contains scratch dir with eddy QC outputs)
     """
     dwi_dir = subject_dir / "dwi"
 
@@ -175,7 +182,7 @@ def process_subject(subject_dir: Path, resolution_name: str, nthreads: int = 0, 
 
     for dwi, dwi_rpe in pe_pairs:
         try:
-            process_dwi_pair(dwi, dwi_rpe, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc)
+            process_dwi_pair(dwi, dwi_rpe, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
         except Exception as e:
             print(f"  ERROR: Failed to process {dwi.name}: {e}")
             continue
@@ -199,10 +206,16 @@ def main():
         action="store_true",
         help="Skip dwifslpreproc, use existing preprocessed DWI in output dirs",
     )
+    parser.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep temporary directory (contains scratch dir with eddy QC outputs)",
+    )
     args = parser.parse_args()
 
     print("Processing single_pe_rpe DWI data")
     print(f"Topup threads: {args.topup_threads}")
+    print(f"Keep tmp: {args.keep_tmp}")
     print("=" * 60)
     print()
 
@@ -217,7 +230,7 @@ def main():
         for subject_dir in subjects:
             print(f"=== {subject_dir.name} [native 1.6mm] ===")
             try:
-                process_subject(subject_dir, "native 1.6mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
+                process_subject(subject_dir, "native 1.6mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp)
             except Exception as e:
                 print(f"  ERROR: {e}")
             print()
@@ -233,7 +246,7 @@ def main():
         for subject_dir in subjects:
             print(f"=== {subject_dir.name} [downsampled 2.5mm] ===")
             try:
-                process_subject(subject_dir, "downsampled 2.5mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc)
+                process_subject(subject_dir, "downsampled 2.5mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp)
             except Exception as e:
                 print(f"  ERROR: {e}")
             print()
