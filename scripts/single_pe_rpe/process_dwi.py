@@ -208,8 +208,9 @@ def main():
     )
     parser.add_argument(
         "--keep-tmp",
-        action="store_true",
-        help="Keep temporary directory (contains scratch dir with eddy QC outputs)",
+        default=True,
+        type=lambda x: x.lower() not in ['false', '0', 'no'],
+        help="Keep temporary directory (contains scratch dir with eddy QC outputs) [default: True]",
     )
     args = parser.parse_args()
 
