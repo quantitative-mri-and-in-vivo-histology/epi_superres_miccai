@@ -78,7 +78,7 @@ def process_single_mode(
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
-    Wrapper around common.dwi_processing.process_single_mode for single_pe_rpe dataset.
+    Wrapper around common.preprocessing.process_single_mode for single_pe_rpe dataset.
     """
     # Compute expected paths for skip_preproc case
     preprocessed_path, eddy_dir_path = (
@@ -86,7 +86,7 @@ def process_single_mode(
     )
 
     # Call common processing function
-    from scripts.common.dwi_processing import process_single_mode as common_process_single_mode
+    from scripts.common.preprocessing import process_single_mode as common_process_single_mode
     common_process_single_mode(
         dwi_forward=dwi,
         dwi_reverse=dwi_rpe,
