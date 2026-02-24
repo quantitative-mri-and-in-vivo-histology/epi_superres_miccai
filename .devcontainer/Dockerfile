@@ -141,7 +141,8 @@ RUN uv pip install --system -r /tmp/requirements.txt && \
   rm /tmp/requirements.txt
 
 # Install antspyx/antspynet separately with binary-only (avoid building ITK from source)
-RUN uv pip install --system --only-binary :all: antspyx antspynet
+# Explicitly target Python 3.11 since conda (Python 3.13) is first in PATH
+RUN uv pip install --python /usr/local/bin/python3.11 --only-binary :all: antspyx antspynet
 
 # Switch back to node user
 USER node
