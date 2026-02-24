@@ -53,6 +53,8 @@ def process_single_mode(
     nthreads: int = 0,
     skip_preproc: bool = False,
     keep_tmp: bool = False,
+    template_image: Path | None = None,
+    template_mask: Path | None = None,
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
@@ -75,6 +77,8 @@ def process_single_mode(
         preprocessed_path=preprocessed_path,
         eddy_dir_path=eddy_dir_path,
         keep_tmp=keep_tmp,
+        template_image=template_image,
+        template_mask=template_mask,
     )
 
 
@@ -85,6 +89,8 @@ def process_dwi_pair(
     nthreads: int = 0,
     skip_preproc: bool = False,
     keep_tmp: bool = False,
+    template_image: Path | None = None,
+    template_mask: Path | None = None,
 ) -> None:
     """Process lr/rl DWI pair with both b0_rpe and full_rpe modes.
 
@@ -102,19 +108,23 @@ def process_dwi_pair(
         Skip dwifslpreproc, use existing preprocessed DWI
     keep_tmp : bool
         Keep temporary directory (contains scratch dir with eddy QC outputs)
+    template_image : Path, optional
+        Template head image for brain extraction
+    template_mask : Path, optional
+        Template brain mask for brain extraction
     """
     print(f"  Processing: {dwi_lr.name}")
     print(f"    Reverse PE: {dwi_rl.name}")
     print()
 
     # Process with both modes
-    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="b0_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
-    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="full_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="b0_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp, template_image=template_image, template_mask=template_mask)
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="full_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp, template_image=template_image, template_mask=template_mask)
 
     print(f"  ✓ Completed all modes for lr/rl pair")
 
 
-def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False, keep_tmp: bool = False) -> None:
+def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, skip_preproc: bool = False, keep_tmp: bool = False, template_image: Path | None = None, template_mask: Path | None = None) -> None:
     """Process DWI data at one resolution.
 
     Parameters
@@ -129,6 +139,10 @@ def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, s
         Skip dwifslpreproc, use existing preprocessed DWI
     keep_tmp : bool
         Keep temporary directory (contains scratch dir with eddy QC outputs)
+    template_image : Path, optional
+        Template head image for brain extraction
+    template_mask : Path, optional
+        Template brain mask for brain extraction
     """
     if not dwi_dir.is_dir():
         print(f"  No dwi/ folder at {dwi_dir}, skipping")
@@ -145,7 +159,7 @@ def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, s
     print(f"  Found lr/rl pair [{resolution_name}]")
 
     try:
-        process_dwi_pair(dwi_lr, dwi_rl, dwi_dir, nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+        process_dwi_pair(dwi_lr, dwi_rl, dwi_dir, nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp, template_image=template_image, template_mask=template_mask)
     except Exception as e:
         print(f"  ERROR: Failed to process lr/rl pair: {e}")
         return
@@ -183,11 +197,15 @@ def main():
     print("=" * 60)
     print()
 
+    # Template paths for brain extraction
+    template_image = ROOT / "data/templates/OMM-1_T2_FLAIR_head.nii.gz"
+    template_mask = ROOT / "data/templates/OMM-1_T1_brain_mask_average.nii.gz"
+
     # Process native resolution
     native_dwi_dir = NATIVE_BASE / "dwi"
     if native_dwi_dir.is_dir():
         print(f"=== Native resolution (1.7mm) ===")
-        process_resolution(native_dwi_dir, "native 1.7mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp)
+        process_resolution(native_dwi_dir, "native 1.7mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp, template_image=template_image, template_mask=template_mask)
     else:
         print(f"Native DWI directory not found: {native_dwi_dir}")
         print()
@@ -199,7 +217,7 @@ def main():
 
         if dwi_dir.is_dir():
             print(f"=== Downsampled resolution ({res}mm) ===")
-            process_resolution(dwi_dir, f"downsampled {res}mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp)
+            process_resolution(dwi_dir, f"downsampled {res}mm", nthreads=args.topup_threads, skip_preproc=args.skip_preproc, keep_tmp=args.keep_tmp, template_image=template_image, template_mask=template_mask)
         else:
             print(f"Downsampled DWI directory not found: {dwi_dir}")
             print()

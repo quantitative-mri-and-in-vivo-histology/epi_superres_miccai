@@ -320,8 +320,13 @@ def extract_mean_b0(dwi: Path, output_path: Path) -> Path:
     return output_path
 
 
-def create_brain_mask_from_b0(mean_b0: Path, output_dir: Path) -> Path:
-    """Create brain mask from mean b=0 using ANTs brain extraction with OMM-1 T2 FLAIR template.
+def create_brain_mask_from_b0(
+    mean_b0: Path,
+    output_dir: Path,
+    template_image: Path | None = None,
+    template_mask: Path | None = None,
+) -> Path:
+    """Create brain mask from mean b=0 using ANTs brain extraction.
 
     Parameters
     ----------
@@ -329,6 +334,10 @@ def create_brain_mask_from_b0(mean_b0: Path, output_dir: Path) -> Path:
         Mean b=0 image
     output_dir : Path
         Output directory for mask
+    template_image : Path, optional
+        Template head image for registration (default: OMM-1_T1_head.nii.gz)
+    template_mask : Path, optional
+        Template brain mask (default: OMM-1_T1_brain_mask_average.nii.gz)
 
     Returns
     -------
@@ -337,9 +346,15 @@ def create_brain_mask_from_b0(mean_b0: Path, output_dir: Path) -> Path:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use default templates if not provided
     root = Path(__file__).resolve().parent.parent.parent
-    template = root / "data/templates/OMM-1_T2_FLAIR_head.nii.gz"
-    template_mask = root / "data/templates/OMM-1_T1_brain_mask_average.nii.gz"
+    if template_image is None:
+        template_image = root / "data/templates/OMM-1_T1_head.nii.gz"
+    if template_mask is None:
+        template_mask = root / "data/templates/OMM-1_T1_brain_mask_average.nii.gz"
+
+    template = template_image
+    template_mask = template_mask
 
     prefix = output_dir / "ants_"
     run_command(
@@ -937,6 +952,8 @@ def process_single_mode(
     preprocessed_path: Path | None = None,
     eddy_dir_path: Path | None = None,
     keep_tmp: bool = False,
+    template_image: Path | None = None,
+    template_mask: Path | None = None,
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
@@ -962,6 +979,10 @@ def process_single_mode(
         Expected path to eddy output directory (required if skip_preproc=True)
     keep_tmp : bool
         Keep temporary directory (contains scratch dir with eddy QC outputs)
+    template_image : Path, optional
+        Template head image for brain extraction
+    template_mask : Path, optional
+        Template brain mask for brain extraction
     """
     print(f"  === Mode: {mode} ===")
 
@@ -992,7 +1013,9 @@ def process_single_mode(
     print(f"    Mean b0: {mean_b0.name}")
 
     mask_tmp = dwi_dir / f"_mask_tmp_{mode}"
-    brain_mask = create_brain_mask_from_b0(mean_b0, mask_tmp)
+    brain_mask = create_brain_mask_from_b0(
+        mean_b0, mask_tmp, template_image=template_image, template_mask=template_mask
+    )
     brain_mask.rename(final_mask)
     shutil.rmtree(mask_tmp, ignore_errors=True)
     print(f"    Brain mask: {final_mask.name}")
