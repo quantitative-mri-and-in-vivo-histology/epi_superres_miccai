@@ -157,6 +157,7 @@ data
 data/*
 logs/
 figures/
+!scripts/figures/
 models/
 !epi1/models/
 !epi1/data/

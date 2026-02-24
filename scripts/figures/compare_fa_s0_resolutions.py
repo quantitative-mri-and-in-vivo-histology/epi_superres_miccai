@@ -75,8 +75,8 @@ def main():
 
     for resolution in RESOLUTIONS:
         dwi_dir = MULTI_PE_RPE_BASE / resolution / "processed" / "dwi"
-        s0_path = dwi_dir / "dwi_merged_preprocessed_anat_dti_s0.nii.gz"
-        fa_path = dwi_dir / "dwi_merged_preprocessed_anat_dti_fa.nii.gz"
+        s0_path = dwi_dir / "dwi_merged_preprocessed_dti_s0.nii.gz"
+        fa_path = dwi_dir / "dwi_merged_preprocessed_dti_fa.nii.gz"
 
         if not s0_path.exists() or not fa_path.exists():
             print(f"Warning: Missing files for {resolution}")

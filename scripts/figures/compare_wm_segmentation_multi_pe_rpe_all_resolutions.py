@@ -93,8 +93,8 @@ def collect_dice_scores() -> pd.DataFrame:
     """
     print("Processing multi_pe_rpe dataset across all resolutions...")
 
-    # Reference: MPRAGE-based WM segmentation
-    ref_wm_path = MULTI_PE_RPE_BASE / "native_res" / "processed" / "anat" / "segmentation_prob_wm_downsampled_1p7.nii.gz"
+    # Reference: MPRAGE-based WM segmentation (SPM c2)
+    ref_wm_path = MULTI_PE_RPE_BASE / "native_res" / "processed" / "anat" / "c2mprage.nii"
 
     if not ref_wm_path.exists():
         print(f"  Warning: Reference WM map not found: {ref_wm_path}")
@@ -118,9 +118,9 @@ def collect_dice_scores() -> pd.DataFrame:
             continue
 
         # PE mode: dwi_lr
-        pe_wm_path = dwi_dir / "dwi_lr_preprocessed_anat_segmentation_prob_wm.nii.gz"
+        pe_wm_path = dwi_dir / "dwi_lr_preprocessed_wm_in_anat.nii.gz"
         # RPE mode: dwi_merged
-        rpe_wm_path = dwi_dir / "dwi_merged_preprocessed_anat_segmentation_prob_wm.nii.gz"
+        rpe_wm_path = dwi_dir / "dwi_merged_preprocessed_wm_in_anat.nii.gz"
 
         for mode, dwi_wm_path in [("PE", pe_wm_path), ("RPE", rpe_wm_path)]:
             if not dwi_wm_path.exists():
@@ -187,12 +187,9 @@ def plot_dice_scores(df: pd.DataFrame, output_path: Path):
     ax.set_ylabel("Dice Coefficient", fontsize=12, fontweight="bold")
     ax.set_title("White Matter Segmentation: Multi PE/RPE Dataset\n(MPRAGE reference)",
                  fontsize=14, fontweight="bold", pad=20)
-    ax.set_ylim(0, 1.0)
+    ax.set_ylim(0.5, 1.0)
     ax.legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
     ax.grid(axis="y", alpha=0.3)
-    ax.axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
-    ax.text(0.02, 0.71, "Good overlap (0.7)", fontsize=9, color="gray",
-            transform=ax.get_yaxis_transform())
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
