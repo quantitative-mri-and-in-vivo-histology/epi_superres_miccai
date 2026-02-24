@@ -63,11 +63,15 @@ for r = 1:size(resolutions, 1)
             fprintf('    Mode: %s\n', mode_name);
 
             % Find mean_b0 and dti_fa files matching the pattern
-            mean_b0_pattern = fullfile(dwi_dir, [file_pattern '_mean_b0.nii*']);
-            dti_fa_pattern  = fullfile(dwi_dir, [file_pattern '_dti_fa.nii*']);
+            mean_b0_pattern = fullfile(dwi_dir, [file_pattern '_mean_b0.nii.gz']);
+            dti_fa_pattern  = fullfile(dwi_dir, [file_pattern '_dti_fa.nii.gz']);
 
             mean_b0_files = dir(mean_b0_pattern);
             dti_fa_files  = dir(dti_fa_pattern);
+
+            % Filter out SPM output files (c1, c2, c3, etc.)
+            mean_b0_files = mean_b0_files(~cellfun(@(x) ~isempty(regexp(x, '^c[0-9]', 'once')), {mean_b0_files.name}));
+            dti_fa_files  = dti_fa_files(~cellfun(@(x) ~isempty(regexp(x, '^c[0-9]', 'once')), {dti_fa_files.name}));
 
             if isempty(mean_b0_files)
                 fprintf('      mean_b0 not found (pattern: %s), skipping\n', [file_pattern '_mean_b0.nii*']);

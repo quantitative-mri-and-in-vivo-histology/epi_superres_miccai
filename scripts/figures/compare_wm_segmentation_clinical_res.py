@@ -105,13 +105,13 @@ def find_dwi_wm_maps(subject_dir: Path, resolution: str) -> dict[str, Path]:
     results = {}
 
     # PE (single phase encoding): dir-AP
-    pe_pattern = f"{subject_id}_*dir-AP*_preprocessed_anat_segmentation_prob_wm.nii.gz"
+    pe_pattern = f"{subject_id}_*dir-AP*_preprocessed_wm_in_anat.nii.gz"
     pe_files = list(dwi_dir.glob(pe_pattern))
     if pe_files:
         results["PE"] = pe_files[0]
 
     # RPE (reverse phase encoding): merged
-    rpe_pattern = f"{subject_id}_*merged*_preprocessed_anat_segmentation_prob_wm.nii.gz"
+    rpe_pattern = f"{subject_id}_*merged*_preprocessed_wm_in_anat.nii.gz"
     rpe_files = list(dwi_dir.glob(rpe_pattern))
     if rpe_files:
         results["RPE"] = rpe_files[0]
@@ -138,8 +138,8 @@ def collect_dice_scores_single_pe_rpe() -> pd.DataFrame:
         subject_id = subject_dir.name
         print(f"Processing {subject_id}...")
 
-        # Reference: MTsat-based WM segmentation
-        ref_wm_path = subject_dir / "mpm" / "segmentation_prob_wm_downsampled_1p6.nii.gz"
+        # Reference: MTsat-based WM segmentation (SPM c2 = WM)
+        ref_wm_path = subject_dir / "mpm" / f"c2{subject_id}_MTsat.nii"
 
         if not ref_wm_path.exists():
             print(f"  Warning: Reference WM map not found: {ref_wm_path}")
@@ -197,8 +197,8 @@ def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
     """
     print("Processing multi_pe_rpe dataset...")
 
-    # Reference: MPRAGE-based WM segmentation
-    ref_wm_path = MULTI_PE_RPE_BASE / "native_res" / "processed" / "anat" / "segmentation_prob_wm_downsampled_1p7.nii.gz"
+    # Reference: MPRAGE-based WM segmentation (SPM c2 = WM)
+    ref_wm_path = MULTI_PE_RPE_BASE / "native_res" / "processed" / "anat" / "c2mprage.nii"
 
     if not ref_wm_path.exists():
         print(f"  Warning: Reference WM map not found: {ref_wm_path}")
@@ -222,9 +222,9 @@ def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
             continue
 
         # PE mode: dwi_lr
-        pe_wm_path = dwi_dir / "dwi_lr_preprocessed_anat_segmentation_prob_wm.nii.gz"
+        pe_wm_path = dwi_dir / "dwi_lr_preprocessed_wm_in_anat.nii.gz"
         # RPE mode: dwi_merged
-        rpe_wm_path = dwi_dir / "dwi_merged_preprocessed_anat_segmentation_prob_wm.nii.gz"
+        rpe_wm_path = dwi_dir / "dwi_merged_preprocessed_wm_in_anat.nii.gz"
 
         for mode, dwi_wm_path in [("PE", pe_wm_path), ("RPE", rpe_wm_path)]:
             if not dwi_wm_path.exists():

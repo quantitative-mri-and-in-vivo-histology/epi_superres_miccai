@@ -82,7 +82,8 @@ def process_single_mode(
     Custom implementation for single_pe_rpe that uses existing MTsat brain mask
     instead of computing a new one from b0.
     """
-    from scripts.common.preprocessing import run_dwifslpreproc, extract_mean_b0, fit_tensors
+    from scripts.common.preprocessing import (extract_mean_b0, fit_tensors,
+                                              run_dwifslpreproc)
     from utils.cmd_utils import run_command
 
     print(f"  === Mode: {mode} ===")
@@ -119,9 +120,11 @@ def process_single_mode(
     extract_mean_b0(preprocessed, mean_b0)
     print(f"    Mean b0: {mean_b0.name}")
 
-    # Find MTsat brain mask (in ../mpm relative to dwi_dir)
+    # Find MTsat brain mask (always in native_res, not in downsampled directories)
     subject_dir = dwi_dir.parent
-    mtsat_mask = subject_dir / "mpm" / "mtsat_brain_mask.nii.gz"
+    subject_id = subject_dir.name  # e.g., 'sub-V10554'
+    native_mpm_dir = ROOT / "data/single_pe_rpe/native_res/processed" / subject_id / "mpm"
+    mtsat_mask = native_mpm_dir / "mtsat_brain_mask.nii.gz"
 
     if not mtsat_mask.exists():
         raise FileNotFoundError(f"MTsat brain mask not found: {mtsat_mask}")
