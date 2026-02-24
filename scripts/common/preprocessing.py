@@ -11,7 +11,6 @@ import numpy as np
 
 from utils.cmd_utils import run_command
 from utils.nifti_utils import get_bval_path, get_bvec_path, get_json_path, get_pe_direction, get_readout_time, strip_nifti_ext
-from utils.warp_utils import combine_and_apply_warps, convert_ants_to_flirt
 
 def add_suffix(nii_path: Path, suffix: str) -> Path:
     """Add a suffix before .nii.gz, e.g. _denoised.
@@ -773,218 +772,159 @@ def fit_tensors(dwi: Path, output_prefix: Path, mask: Path) -> dict[str, Path]:
     return outputs
 
 
-def register_to_anat_ref(
-    preprocessed_dwi: Path,
-    eddy_output_dir: Path,
-    anat_ref_image: Path,
+def register_to_anat_ref_nonlinear(
+    mean_b0: Path,
+    fa: Path,
+    anat_ref: Path,
+    anat_mask: Path,
+    dwi_mask: Path,
     output_dir: Path,
-    brain_mask: Path | None = None,
-    anat_mask_image: Path | None = None,
-    dwi_mask: Path | None = None,
     nthreads: int = 0,
-) -> tuple[Path, Path]:
-    """Register DWI to anatomical reference with single-interpolation warp combination.
+) -> list[Path]:
+    """Register DWI to anatomical reference using multi-metric SyN.
 
-    Performs rigid registration of DWI → anatomical reference, then combines
-    eddy displacement fields + registration transform in a single interpolation step.
+    Uses mean b=0 and DTI FA jointly as multi-metric moving channels against
+    the anatomical reference. Rigid and affine stages run without masks for
+    robust global alignment; SyN stage uses brain masks to focus the nonlinear
+    warp on tissue.
 
     Parameters
     ----------
-    preprocessed_dwi : Path
-        Preprocessed DWI from dwifslpreproc (eddy-corrected)
-    eddy_output_dir : Path
-        Directory containing eddy outputs (dwi_post_eddy.nii.gz and dfields/)
-    anat_ref_image : Path
-        Anatomical reference image (e.g., T1w, MTsat)
+    mean_b0 : Path
+        Mean b=0 image (moving, DWI space)
+    fa : Path
+        DTI FA image (moving, DWI space)
+    anat_ref : Path
+        Anatomical reference image (fixed, e.g. MPRAGE)
+    anat_mask : Path
+        Brain mask in anatomical reference space (used in SyN stage only)
+    dwi_mask : Path
+        Brain mask in DWI space (used in SyN stage only)
     output_dir : Path
-        Output directory for registered DWI and intermediate files
-    brain_mask : Path, optional
-        Brain mask for tensor fitting (if None, will create one)
-    anat_mask_image : Path, optional
-        Anatomical brain mask to regrid and use (instead of creating from DWI)
-    dwi_mask : Path, optional
-        DWI brain mask to use for masked registration
+        Output directory for transforms and warped images
     nthreads : int
-        Number of threads (0=all available)
+        Number of threads (0 = all available)
 
     Returns
     -------
-    tuple[Path, Path]
-        (registered DWI path, brain mask path)
+    list[Path]
+        Transform paths in antsApplyTransforms application order
+        (DWI → anat): [warp, affine]
     """
     import os
 
     if nthreads == 0:
         nthreads = os.cpu_count() or 1
-    output_dir.mkdir(parents=True, exist_ok=True)
-    reg_dir = output_dir / "reg"
-    reg_dir.mkdir(parents=True, exist_ok=True)
-
-    # Extract first volume of dwi_post_eddy with fslroi to preserve
-    # FSL headers (consistent with eddy displacement fields)
-    print("  Extracting first volume from dwi_post_eddy...")
-    eddy_post_vol0 = reg_dir / "dwi_post_eddy_vol0.nii.gz"
-    dwi_post_eddy = eddy_output_dir / "dwi_post_eddy.nii.gz"
-    run_command(f"fslroi {dwi_post_eddy} {eddy_post_vol0} 0 1", verbose=False)
-
-    # Register eddy first vol → anatomical reference (rigid, mutual information)
-    # ANTs threading is controlled via environment variable, not CLI flag
-    print(f"  Registering DWI → anatomical reference (rigid, {nthreads} threads)...")
     os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(nthreads)
-    reg_prefix = reg_dir / "b0_to_anat"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Apply masks directly to images before registration if available
-    anat_for_reg = anat_ref_image
-    dwi_for_reg = eddy_post_vol0
+    prefix = output_dir / "dwi_to_anat_"
 
-    if anat_mask_image is not None and dwi_mask is not None:
-        print(f"    Masking images for registration")
-
-        # Regrid anatomical mask to match anatomical reference
-        anat_mask_reg = reg_dir / "anat_mask_for_reg.nii.gz"
-        run_command(
-            f"mrtransform {anat_mask_image} -template {anat_ref_image} "
-            f"-interp nearest {anat_mask_reg} -force",
-            verbose=False,
-        )
-        run_command(
-            f"mrconvert {anat_mask_reg} -strides {anat_ref_image} {anat_mask_reg} -force",
-            verbose=False,
-        )
-
-        # Regrid DWI mask to match eddy_post_vol0
-        dwi_mask_reg = reg_dir / "dwi_mask_for_reg.nii.gz"
-        run_command(
-            f"mrtransform {dwi_mask} -template {eddy_post_vol0} "
-            f"-interp nearest {dwi_mask_reg} -force",
-            verbose=False,
-        )
-        run_command(
-            f"mrconvert {dwi_mask_reg} -strides {eddy_post_vol0} {dwi_mask_reg} -force",
-            verbose=False,
-        )
-
-        # Create masked anatomical reference
-        anat_masked = reg_dir / "anat_masked.nii.gz"
-        run_command(
-            f"mrcalc {anat_ref_image} {anat_mask_reg} -mult {anat_masked} -force",
-            verbose=False,
-        )
-
-        # Create masked DWI
-        dwi_masked = reg_dir / "dwi_masked.nii.gz"
-        run_command(
-            f"mrcalc {eddy_post_vol0} {dwi_mask_reg} -mult {dwi_masked} -force",
-            verbose=False,
-        )
-
-        anat_for_reg = anat_masked
-        dwi_for_reg = dwi_masked
-
+    print(f"  Registering DWI → anat ref (Rigid+Affine+SyN, {nthreads} threads)...")
     run_command(
-        f"antsRegistration --dimensionality 3 --float 0"
-        f" --output [{reg_prefix}_,{reg_prefix}_Warped.nii.gz]"
-        f" --interpolation Linear"
-        f" --use-histogram-matching 0"
-        f" --initial-moving-transform [{anat_for_reg},{dwi_for_reg},1]"
-        f" --transform Rigid[0.1]"
-        f" --metric MI[{anat_for_reg},{dwi_for_reg},1,32,Regular,0.25]"
-        f" --convergence [1000x500x250x100,1e-6,10]"
-        f" --smoothing-sigmas 3x2x1x0vox"
-        f" --shrink-factors 8x4x2x1",
-        verbose=False,
-    )
-    ants_mat = Path(f"{reg_prefix}_0GenericAffine.mat")
-    print(f"    ANTs transform: {ants_mat.name}")
-
-    # Convert ANTs transform → FLIRT format
-    # Use eddy_post_vol0 for both ref and src to keep FSL headers
-    # consistent with the eddy displacement fields in convertwarp
-    print("  Converting ANTs transform to FLIRT format...")
-    flirt_mat = reg_dir / "b0_to_anat_flirt.txt"
-    convert_ants_to_flirt(
-        ants_mat, ref=eddy_post_vol0, src=eddy_post_vol0, output=flirt_mat,
-    )
-
-    # Combine eddy warps + registration in single interpolation
-    # Output matches anatomical reference voxel size and grid
-    # Using MRtrix mrtransform handles stride order correctly
-    print("  Applying combined warps (eddy + registration)...")
-    dwi_anat = output_dir / f"{preprocessed_dwi.stem.replace('.nii', '')}_anat.nii.gz"
-    combine_and_apply_warps(
-        eddy_output_dir, dwi_anat,
-        postmat=flirt_mat,
-        ref_image=anat_ref_image,
-        nprocs=nthreads,
+        f"antsRegistration --verbose 1 "
+        f"--random-seed 0 "
+        f"--dimensionality 3 --float 0 --collapse-output-transforms 1 "
+        f"--output [{prefix},{prefix}Warped.nii.gz] "
+        f"--interpolation BSpline[3] --use-histogram-matching 0 "
+        f"--winsorize-image-intensities [0.005,0.995] "
+        # Rigid stage — no masks, global alignment
+        f"--transform Rigid[0.1] "
+        f"-x [NULL,NULL] "
+        f"--metric MI[{anat_ref},{mean_b0},0.5,32,Regular,0.25] "
+        f"--metric MI[{anat_ref},{fa},0.5,32,Regular,0.25] "
+        f"--convergence [1000x500x250x100,1e-6,10] "
+        f"--shrink-factors 8x4x2x1 "
+        f"--smoothing-sigmas 3x2x1x0vox "
+        # Affine stage — no masks
+        f"--transform Affine[0.1] "
+        f"-x [NULL,NULL] "
+        f"--metric MI[{anat_ref},{mean_b0},0.5,32,Regular,0.25] "
+        f"--metric MI[{anat_ref},{fa},0.5,32,Regular,0.25] "
+        f"--convergence [1000x500x250x100,1e-6,10] "
+        f"--shrink-factors 8x4x2x1 "
+        f"--smoothing-sigmas 3x2x1x0vox "
+        # SyN stage — with brain masks
+        f"--transform SyN[0.1,3,0] "
+        f"-x [{anat_mask},{dwi_mask}] "
+        f"--metric CC[{anat_ref},{mean_b0},0.5,4] "
+        f"--metric CC[{anat_ref},{fa},0.5,4] "
+        f"--convergence [100x70x50x20,1e-6,10] "
+        f"--shrink-factors 8x4x2x1 "
+        f"--smoothing-sigmas 3x2x1x0vox",
+        verbose=True,
     )
 
-    # Copy bvecs/bvals to anatomical-space output
-    # combine_and_apply_warps uses eddy_outlier_free_data which has the
-    # pre-recombination volume count (e.g., 264 for -rpe_all).
-    # The preprocessed DWI may have fewer volumes (132 after recombination).
-    # If so, duplicate bvec/bval to match the output volume count.
-    import nibabel as nib
-    import numpy as np
+    # collapse-output-transforms 1: rigid+affine → 0GenericAffine.mat, SyN → 1Warp.nii.gz
+    affine = Path(f"{prefix}0GenericAffine.mat")
+    warp = Path(f"{prefix}1Warp.nii.gz")
+    print(f"    Affine: {affine.name}")
+    print(f"    Warp:   {warp.name}")
 
-    bvec_src = get_bvec_path(preprocessed_dwi)
-    bval_src = get_bval_path(preprocessed_dwi)
-    n_vols = nib.load(str(dwi_anat)).shape[3]
-    bvecs = np.loadtxt(bvec_src)
-    bvals = np.loadtxt(bval_src)
-    n_grad = bvecs.shape[1] if bvecs.ndim == 2 else 1
+    # Return in antsApplyTransforms application order for forward (DWI → anat)
+    return [warp, affine]
 
-    if n_vols == n_grad:
-        shutil.copy(bvec_src, get_bvec_path(dwi_anat))
-        shutil.copy(bval_src, get_bval_path(dwi_anat))
-    elif n_vols == 2 * n_grad:
-        # -rpe_all: same directions acquired twice, duplicate bvec/bval
-        bvecs_dup = np.hstack([bvecs, bvecs])
-        bvals_dup = np.concatenate([bvals, bvals])
-        np.savetxt(get_bvec_path(dwi_anat), bvecs_dup, fmt="%.6f")
-        np.savetxt(get_bval_path(dwi_anat), bvals_dup.reshape(1, -1), fmt="%.0f")
-    else:
-        raise ValueError(
-            f"Volume count mismatch: output has {n_vols} volumes "
-            f"but bvec/bval has {n_grad} entries"
-        )
-    print(f"    Registered DWI: {dwi_anat.name} ({n_vols} volumes)")
 
-    # Brain masking
-    if brain_mask is None:
-        if anat_mask_image is not None and anat_mask_image.exists():
-            # Regrid anatomical mask to match registered DWI
-            print("  Regridding anatomical mask to registered DWI space...")
-            final_mask = output_dir / "brain_mask.nii.gz"
-            mask_tmp = output_dir / "_tmp_mask_anat.nii.gz"
-            run_command(
-                f"mrtransform {anat_mask_image} -template {dwi_anat} "
-                f"-interp nearest {mask_tmp} -force",
-                verbose=False,
-            )
-            run_command(
-                f"mrconvert {mask_tmp} -strides {dwi_anat} {final_mask} -force",
-                verbose=False,
-            )
-            mask_tmp.unlink(missing_ok=True)
-            brain_mask = final_mask
-            print(f"    Brain mask (from anat): {final_mask.name}")
-        else:
-            # Create brain mask from registered DWI
-            print("  Creating brain mask from registered DWI...")
-            mask_tmp = output_dir / "_mask_tmp"
-            brain_mask = create_brain_mask(dwi_anat, mask_tmp)
-            final_mask = output_dir / "brain_mask.nii.gz"
-            brain_mask.rename(final_mask)
-            shutil.rmtree(mask_tmp, ignore_errors=True)
-            brain_mask = final_mask
-            print(f"    Brain mask (from DWI): {final_mask.name}")
+def register_to_anat_ref_rigid(
+    mean_b0: Path,
+    fa: Path,
+    anat_ref: Path,
+    anat_mask: Path,
+    dwi_mask: Path,
+    output_dir: Path,
+    nthreads: int = 0,
+) -> list[Path]:
+    """Register DWI to anatomical reference using two rigid stages.
 
-    # Create masked DWI
-    masked_dwi = output_dir / f"{dwi_anat.stem.replace('.nii', '')}_masked.nii.gz"
-    run_command(f"mrcalc {dwi_anat} {brain_mask} -mult {masked_dwi} -force", verbose=False)
-    print(f"    Masked DWI: {masked_dwi.name}")
+    Stage 1: Rigid without masks (global alignment).
+    Stage 2: Rigid with brain masks (mask-focused refinement).
+    Both stages weight b=0 at 0.75 and FA at 0.25.
 
-    return dwi_anat, brain_mask
+    Returns
+    -------
+    list[Path]
+        [affine] — single collapsed rigid transform (0GenericAffine.mat)
+    """
+    import os
+
+    if nthreads == 0:
+        nthreads = os.cpu_count() or 1
+    os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(nthreads)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prefix = output_dir / "dwi_to_anat_"
+
+    print(f"  Registering DWI → anat ref (Rigid×2, {nthreads} threads)...")
+    run_command(
+        f"antsRegistration --verbose 1 "
+        f"--random-seed 0 "
+        f"--dimensionality 3 --float 0 --collapse-output-transforms 1 "
+        f"--output [{prefix},{prefix}Warped.nii.gz] "
+        f"--interpolation BSpline[3] --use-histogram-matching 0 "
+        f"--winsorize-image-intensities [0.005,0.995] "
+        # Rigid stage 1 — no masks, global alignment
+        f"--transform Rigid[0.1] "
+        f"-x [NULL,NULL] "
+        f"--metric MI[{anat_ref},{mean_b0},0.75,32,Regular,0.25] "
+        f"--metric MI[{anat_ref},{fa},0.25,32,Regular,0.25] "
+        f"--convergence [1000x500x250x100,1e-6,10] "
+        f"--shrink-factors 8x4x2x1 "
+        f"--smoothing-sigmas 3x2x1x0vox "
+        # Rigid stage 2 — with brain masks
+        f"--transform Rigid[0.1] "
+        f"-x [{anat_mask},{dwi_mask}] "
+        f"--metric MI[{anat_ref},{mean_b0},0.75,32,Regular,0.25] "
+        f"--metric MI[{anat_ref},{fa},0.25,32,Regular,0.25] "
+        f"--convergence [1000x500x250x100,1e-6,10] "
+        f"--shrink-factors 8x4x2x1 "
+        f"--smoothing-sigmas 3x2x1x0vox",
+        verbose=True,
+    )
+
+    affine = Path(f"{prefix}0GenericAffine.mat")
+    print(f"    Affine: {affine.name}")
+
+    return [affine]
 
 
 def process_single_mode(
