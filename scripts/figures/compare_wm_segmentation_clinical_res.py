@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Compare white matter segmentation between anatomical reference and DWI-based segmentation.
 
-Evaluates anatomical fidelity by computing Dice coefficient between:
-- Reference: MTsat-based WM probability map (ground truth)
-- Test: DWI-based WM probability map (from multi-channel Atropos with FA + S0)
+Evaluates anatomical fidelity by computing two metrics:
+1. Dice coefficient: Overlap between binary masks (threshold = 0.5)
+2. Overlap score: 1 - mean(abs(reference - test)) for voxels where reference > 0.5
+   (metric from sia_overlap.m, measures probability map agreement)
 
-Compares across different resolutions and acquisition modes (PE vs RPE).
+Compares:
+- Reference: MTsat/MPRAGE-based WM probability map (SPM c2, ground truth)
+- Test: DWI-based WM probability map (from multi-channel segmentation with FA + S0)
+
+Across different resolutions and acquisition modes (PE vs RPE).
 """
 
 import sys
@@ -58,6 +63,59 @@ def compute_dice(mask1: np.ndarray, mask2: np.ndarray) -> float:
 
     dice = 2.0 * intersection / sum_masks
     return dice
+
+
+def compute_overlap(prob_ref: np.ndarray, prob_test: np.ndarray, threshold: float = 0.5) -> float:
+    """Compute overlap metric between two probability maps.
+
+    This implements the metric from sia_overlap.m:
+    overlap = 1 - mean(abs(reference - test)) for voxels where reference > threshold
+
+    Parameters
+    ----------
+    prob_ref : np.ndarray
+        Reference probability map
+    prob_test : np.ndarray
+        Test probability map
+    threshold : float
+        Threshold for selecting voxels (default: 0.5)
+
+    Returns
+    -------
+    float
+        Overlap score (0-1, higher is better)
+    """
+    # Select voxels where reference probability > threshold
+    mask = prob_ref > threshold
+
+    if np.sum(mask) == 0:
+        return 1.0  # No reference voxels
+
+    # Compute mean absolute difference within masked region
+    mean_abs_diff = np.mean(np.abs(prob_ref[mask] - prob_test[mask]))
+
+    # Convert to overlap score (1 = perfect agreement, 0 = maximum disagreement)
+    overlap = 1.0 - mean_abs_diff
+
+    return overlap
+
+
+def load_prob_map(prob_map_path: Path) -> np.ndarray:
+    """Load probability map without thresholding.
+
+    Parameters
+    ----------
+    prob_map_path : Path
+        Path to probability map NIfTI file
+
+    Returns
+    -------
+    np.ndarray
+        Probability map (float array, range 0-1)
+    """
+    img = nib.load(str(prob_map_path))
+    prob_data = img.get_fdata()
+    return prob_data
 
 
 def load_and_threshold_prob_map(prob_map_path: Path, threshold: float = 0.5) -> np.ndarray:
@@ -120,12 +178,12 @@ def find_dwi_wm_maps(subject_dir: Path, resolution: str) -> dict[str, Path]:
 
 
 def collect_dice_scores_single_pe_rpe() -> pd.DataFrame:
-    """Collect Dice scores for single_pe_rpe dataset (multi-subject).
+    """Collect Dice and Overlap scores for single_pe_rpe dataset (multi-subject).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: Subject, Resolution, Mode, Dice
+        DataFrame with columns: Subject, Resolution, Mode, Dice, Overlap
     """
     # Find all subjects in native_res
     native_processed = SINGLE_PE_RPE_BASE / "native_res" / "processed"
@@ -145,9 +203,10 @@ def collect_dice_scores_single_pe_rpe() -> pd.DataFrame:
             print(f"  Warning: Reference WM map not found: {ref_wm_path}")
             continue
 
-        # Load reference mask
+        # Load reference probability map and binary mask
         try:
-            ref_mask = load_and_threshold_prob_map(ref_wm_path, WM_PROB_THRESHOLD)
+            ref_prob = load_prob_map(ref_wm_path)
+            ref_mask = ref_prob >= WM_PROB_THRESHOLD
         except Exception as e:
             print(f"  Error loading reference: {e}")
             continue
@@ -163,20 +222,23 @@ def collect_dice_scores_single_pe_rpe() -> pd.DataFrame:
             # Process each mode (PE, RPE)
             for mode, dwi_wm_path in dwi_wm_maps.items():
                 try:
-                    # Load DWI-based mask
-                    dwi_mask = load_and_threshold_prob_map(dwi_wm_path, WM_PROB_THRESHOLD)
+                    # Load DWI-based probability map and binary mask
+                    dwi_prob = load_prob_map(dwi_wm_path)
+                    dwi_mask = dwi_prob >= WM_PROB_THRESHOLD
 
-                    # Compute Dice coefficient
+                    # Compute both metrics
                     dice = compute_dice(ref_mask, dwi_mask)
+                    overlap = compute_overlap(ref_prob, dwi_prob, WM_PROB_THRESHOLD)
 
                     results.append({
                         "Subject": subject_id,
                         "Resolution": SINGLE_RESOLUTION_LABELS[resolution],
                         "Mode": mode,
-                        "Dice": dice
+                        "Dice": dice,
+                        "Overlap": overlap
                     })
 
-                    print(f"  {resolution} - {mode}: Dice = {dice:.4f}")
+                    print(f"  {resolution} - {mode}: Dice = {dice:.4f}, Overlap = {overlap:.4f}")
 
                 except Exception as e:
                     print(f"  Error processing {resolution} - {mode}: {e}")
@@ -188,12 +250,12 @@ def collect_dice_scores_single_pe_rpe() -> pd.DataFrame:
 
 
 def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
-    """Collect Dice scores for multi_pe_rpe dataset (single-subject).
+    """Collect Dice and Overlap scores for multi_pe_rpe dataset (single-subject).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: Resolution, Mode, Dice
+        DataFrame with columns: Resolution, Mode, Dice, Overlap
     """
     print("Processing multi_pe_rpe dataset...")
 
@@ -204,9 +266,10 @@ def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
         print(f"  Warning: Reference WM map not found: {ref_wm_path}")
         return pd.DataFrame()
 
-    # Load reference mask
+    # Load reference probability map and binary mask
     try:
-        ref_mask = load_and_threshold_prob_map(ref_wm_path, WM_PROB_THRESHOLD)
+        ref_prob = load_prob_map(ref_wm_path)
+        ref_mask = ref_prob >= WM_PROB_THRESHOLD
     except Exception as e:
         print(f"  Error loading reference: {e}")
         return pd.DataFrame()
@@ -232,19 +295,22 @@ def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
                 continue
 
             try:
-                # Load DWI-based mask
-                dwi_mask = load_and_threshold_prob_map(dwi_wm_path, WM_PROB_THRESHOLD)
+                # Load DWI-based probability map and binary mask
+                dwi_prob = load_prob_map(dwi_wm_path)
+                dwi_mask = dwi_prob >= WM_PROB_THRESHOLD
 
-                # Compute Dice coefficient
+                # Compute both metrics
                 dice = compute_dice(ref_mask, dwi_mask)
+                overlap = compute_overlap(ref_prob, dwi_prob, WM_PROB_THRESHOLD)
 
                 results.append({
                     "Resolution": MULTI_RESOLUTION_LABELS[resolution],
                     "Mode": mode,
-                    "Dice": dice
+                    "Dice": dice,
+                    "Overlap": overlap
                 })
 
-                print(f"  {resolution} - {mode}: Dice = {dice:.4f}")
+                print(f"  {resolution} - {mode}: Dice = {dice:.4f}, Overlap = {overlap:.4f}")
 
             except Exception as e:
                 print(f"  Error processing {resolution} - {mode}: {e}")
@@ -256,25 +322,26 @@ def collect_dice_scores_multi_pe_rpe() -> pd.DataFrame:
 
 
 def plot_dice_scores(df_single: pd.DataFrame, df_multi: pd.DataFrame, output_path: Path):
-    """Create dual bar plot comparing Dice scores across both datasets.
+    """Create 2x2 grid comparing Dice and Overlap scores across both datasets.
 
     Parameters
     ----------
     df_single : pd.DataFrame
-        Single_pe_rpe DataFrame with columns: Subject, Resolution, Mode, Dice
+        Single_pe_rpe DataFrame with columns: Subject, Resolution, Mode, Dice, Overlap
     df_multi : pd.DataFrame
-        Multi_pe_rpe DataFrame with columns: Resolution, Mode, Dice
+        Multi_pe_rpe DataFrame with columns: Resolution, Mode, Dice, Overlap
     output_path : Path
         Output path for the figure
     """
     # Set up the plot style
     sns.set_style("whitegrid")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
     hue_order = ["PE", "RPE"]
     palette = ["#E69F00", "#56B4E9"]  # Colorblind-friendly palette
 
-    # Subplot 1: single_pe_rpe (multi-subject)
+    # Row 1: Dice coefficients
+    # Subplot (0,0): single_pe_rpe Dice
     if not df_single.empty:
         x_order_single = list(SINGLE_RESOLUTION_LABELS.values())
         sns.barplot(
@@ -286,23 +353,20 @@ def plot_dice_scores(df_single: pd.DataFrame, df_multi: pd.DataFrame, output_pat
             hue_order=hue_order,
             palette=palette,
             errorbar="sd",  # Show standard deviation as error bars
-            ax=ax1
+            ax=axes[0, 0]
         )
-        ax1.set_xlabel("Resolution", fontsize=12, fontweight="bold")
-        ax1.set_ylabel("Dice Coefficient", fontsize=12, fontweight="bold")
-        ax1.set_title("Single PE/RPE Dataset\n(MTsat reference)",
-                     fontsize=14, fontweight="bold", pad=20)
-        ax1.set_ylim(0, 1.0)
-        ax1.legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
-        ax1.grid(axis="y", alpha=0.3)
-        ax1.axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
-        ax1.text(0.02, 0.71, "Good overlap (0.7)", fontsize=9, color="gray",
-                transform=ax1.get_yaxis_transform())
+        axes[0, 0].set_xlabel("Resolution", fontsize=12, fontweight="bold")
+        axes[0, 0].set_ylabel("Dice Coefficient", fontsize=12, fontweight="bold")
+        axes[0, 0].set_title("Single PE/RPE Dataset - Dice\n(MTsat reference)",
+                            fontsize=14, fontweight="bold", pad=20)
+        axes[0, 0].set_ylim(0, 1.0)
+        axes[0, 0].legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
+        axes[0, 0].grid(axis="y", alpha=0.3)
+        axes[0, 0].axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
 
-    # Subplot 2: multi_pe_rpe (single-subject)
+    # Subplot (0,1): multi_pe_rpe Dice
     if not df_multi.empty:
         x_order_multi = list(MULTI_RESOLUTION_LABELS.values())
-        # For single subject, no error bars (no SD)
         sns.barplot(
             data=df_multi,
             x="Resolution",
@@ -312,18 +376,63 @@ def plot_dice_scores(df_single: pd.DataFrame, df_multi: pd.DataFrame, output_pat
             hue_order=hue_order,
             palette=palette,
             errorbar=None,  # No error bars for single subject
-            ax=ax2
+            ax=axes[0, 1]
         )
-        ax2.set_xlabel("Resolution", fontsize=12, fontweight="bold")
-        ax2.set_ylabel("Dice Coefficient", fontsize=12, fontweight="bold")
-        ax2.set_title("Multi PE/RPE Dataset\n(MPRAGE reference)",
-                     fontsize=14, fontweight="bold", pad=20)
-        ax2.set_ylim(0, 1.0)
-        ax2.legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
-        ax2.grid(axis="y", alpha=0.3)
-        ax2.axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
-        ax2.text(0.02, 0.71, "Good overlap (0.7)", fontsize=9, color="gray",
-                transform=ax2.get_yaxis_transform())
+        axes[0, 1].set_xlabel("Resolution", fontsize=12, fontweight="bold")
+        axes[0, 1].set_ylabel("Dice Coefficient", fontsize=12, fontweight="bold")
+        axes[0, 1].set_title("Multi PE/RPE Dataset - Dice\n(MPRAGE reference)",
+                            fontsize=14, fontweight="bold", pad=20)
+        axes[0, 1].set_ylim(0, 1.0)
+        axes[0, 1].legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
+        axes[0, 1].grid(axis="y", alpha=0.3)
+        axes[0, 1].axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+
+    # Row 2: Overlap scores
+    # Subplot (1,0): single_pe_rpe Overlap
+    if not df_single.empty:
+        x_order_single = list(SINGLE_RESOLUTION_LABELS.values())
+        sns.barplot(
+            data=df_single,
+            x="Resolution",
+            y="Overlap",
+            hue="Mode",
+            order=x_order_single,
+            hue_order=hue_order,
+            palette=palette,
+            errorbar="sd",
+            ax=axes[1, 0]
+        )
+        axes[1, 0].set_xlabel("Resolution", fontsize=12, fontweight="bold")
+        axes[1, 0].set_ylabel("Overlap Score", fontsize=12, fontweight="bold")
+        axes[1, 0].set_title("Single PE/RPE Dataset - Overlap\n(MTsat reference)",
+                            fontsize=14, fontweight="bold", pad=20)
+        axes[1, 0].set_ylim(0, 1.0)
+        axes[1, 0].legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
+        axes[1, 0].grid(axis="y", alpha=0.3)
+        axes[1, 0].axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+
+    # Subplot (1,1): multi_pe_rpe Overlap
+    if not df_multi.empty:
+        x_order_multi = list(MULTI_RESOLUTION_LABELS.values())
+        sns.barplot(
+            data=df_multi,
+            x="Resolution",
+            y="Overlap",
+            hue="Mode",
+            order=x_order_multi,
+            hue_order=hue_order,
+            palette=palette,
+            errorbar=None,
+            ax=axes[1, 1]
+        )
+        axes[1, 1].set_xlabel("Resolution", fontsize=12, fontweight="bold")
+        axes[1, 1].set_ylabel("Overlap Score", fontsize=12, fontweight="bold")
+        axes[1, 1].set_title("Multi PE/RPE Dataset - Overlap\n(MPRAGE reference)",
+                            fontsize=14, fontweight="bold", pad=20)
+        axes[1, 1].set_ylim(0, 1.0)
+        axes[1, 1].legend(title="Acquisition", title_fontsize=11, fontsize=10, loc="lower right")
+        axes[1, 1].grid(axis="y", alpha=0.3)
+        axes[1, 1].axhline(y=0.7, color="gray", linestyle="--", alpha=0.5, linewidth=1)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
@@ -331,93 +440,117 @@ def plot_dice_scores(df_single: pd.DataFrame, df_multi: pd.DataFrame, output_pat
 
 
 def print_summary_statistics(df_single: pd.DataFrame, df_multi: pd.DataFrame):
-    """Print summary statistics of Dice scores for both datasets.
+    """Print summary statistics of Dice and Overlap scores for both datasets.
 
     Parameters
     ----------
     df_single : pd.DataFrame
-        Single_pe_rpe DataFrame with columns: Subject, Resolution, Mode, Dice
+        Single_pe_rpe DataFrame with columns: Subject, Resolution, Mode, Dice, Overlap
     df_multi : pd.DataFrame
-        Multi_pe_rpe DataFrame with columns: Resolution, Mode, Dice
+        Multi_pe_rpe DataFrame with columns: Resolution, Mode, Dice, Overlap
     """
     from scipy.stats import ttest_rel
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("SUMMARY STATISTICS")
-    print("=" * 60)
+    print("=" * 70)
 
     # Single PE/RPE dataset
     if not df_single.empty:
         print("\n--- Single PE/RPE Dataset (Multi-Subject) ---")
+
+        # Dice statistics
+        print("\n** DICE COEFFICIENT **")
         grouped = df_single.groupby(["Resolution", "Mode"])["Dice"]
         summary = grouped.agg(["count", "mean", "std", "min", "max"])
         summary.columns = ["N", "Mean", "Std", "Min", "Max"]
-        print("\n", summary.to_string())
+        print(summary.to_string())
+
+        # Overlap statistics
+        print("\n** OVERLAP SCORE **")
+        grouped = df_single.groupby(["Resolution", "Mode"])["Overlap"]
+        summary = grouped.agg(["count", "mean", "std", "min", "max"])
+        summary.columns = ["N", "Mean", "Std", "Min", "Max"]
+        print(summary.to_string())
 
         # Statistical comparison between PE and RPE
-        print("\n" + "-" * 60)
+        print("\n" + "-" * 70)
         print("PE vs RPE Comparison (paired t-test)")
-        print("-" * 60)
+        print("-" * 70)
 
-        for resolution in df_single["Resolution"].unique():
-            res_df = df_single[df_single["Resolution"] == resolution]
+        for metric in ["Dice", "Overlap"]:
+            print(f"\n** {metric.upper()} **")
+            for resolution in df_single["Resolution"].unique():
+                res_df = df_single[df_single["Resolution"] == resolution]
 
-            # Get paired data (same subjects)
-            pe_data = res_df[res_df["Mode"] == "PE"].set_index("Subject")["Dice"]
-            rpe_data = res_df[res_df["Mode"] == "RPE"].set_index("Subject")["Dice"]
+                # Get paired data (same subjects)
+                pe_data = res_df[res_df["Mode"] == "PE"].set_index("Subject")[metric]
+                rpe_data = res_df[res_df["Mode"] == "RPE"].set_index("Subject")[metric]
 
-            # Find common subjects
-            common_subjects = pe_data.index.intersection(rpe_data.index)
+                # Find common subjects
+                common_subjects = pe_data.index.intersection(rpe_data.index)
 
-            if len(common_subjects) > 1:
-                pe_paired = pe_data.loc[common_subjects]
-                rpe_paired = rpe_data.loc[common_subjects]
+                if len(common_subjects) > 1:
+                    pe_paired = pe_data.loc[common_subjects]
+                    rpe_paired = rpe_data.loc[common_subjects]
 
-                t_stat, p_value = ttest_rel(pe_paired, rpe_paired)
+                    t_stat, p_value = ttest_rel(pe_paired, rpe_paired)
 
-                print(f"\n{resolution}:")
-                print(f"  N pairs: {len(common_subjects)}")
-                print(f"  PE mean:  {pe_paired.mean():.4f} ± {pe_paired.std():.4f}")
-                print(f"  RPE mean: {rpe_paired.mean():.4f} ± {rpe_paired.std():.4f}")
-                print(f"  Difference: {rpe_paired.mean() - pe_paired.mean():.4f}")
-                print(f"  t-statistic: {t_stat:.4f}")
-                print(f"  p-value: {p_value:.4f}")
+                    print(f"\n{resolution}:")
+                    print(f"  N pairs: {len(common_subjects)}")
+                    print(f"  PE mean:  {pe_paired.mean():.4f} ± {pe_paired.std():.4f}")
+                    print(f"  RPE mean: {rpe_paired.mean():.4f} ± {rpe_paired.std():.4f}")
+                    print(f"  Difference: {rpe_paired.mean() - pe_paired.mean():.4f}")
+                    print(f"  t-statistic: {t_stat:.4f}")
+                    print(f"  p-value: {p_value:.4f}")
 
-                if p_value < 0.001:
-                    sig_str = "***"
-                elif p_value < 0.01:
-                    sig_str = "**"
-                elif p_value < 0.05:
-                    sig_str = "*"
-                else:
-                    sig_str = "n.s."
-                print(f"  Significance: {sig_str}")
+                    if p_value < 0.001:
+                        sig_str = "***"
+                    elif p_value < 0.01:
+                        sig_str = "**"
+                    elif p_value < 0.05:
+                        sig_str = "*"
+                    else:
+                        sig_str = "n.s."
+                    print(f"  Significance: {sig_str}")
 
     # Multi PE/RPE dataset
     if not df_multi.empty:
         print("\n\n--- Multi PE/RPE Dataset (Single-Subject) ---")
+
+        # Dice statistics
+        print("\n** DICE COEFFICIENT **")
         grouped = df_multi.groupby(["Resolution", "Mode"])["Dice"]
         summary = grouped.agg(["count", "mean"])
         summary.columns = ["N", "Dice"]
-        print("\n", summary.to_string())
+        print(summary.to_string())
+
+        # Overlap statistics
+        print("\n** OVERLAP SCORE **")
+        grouped = df_multi.groupby(["Resolution", "Mode"])["Overlap"]
+        summary = grouped.agg(["count", "mean"])
+        summary.columns = ["N", "Overlap"]
+        print(summary.to_string())
 
         # Simple difference (no t-test for single subject)
-        print("\n" + "-" * 60)
+        print("\n" + "-" * 70)
         print("PE vs RPE Comparison")
-        print("-" * 60)
+        print("-" * 70)
 
-        for resolution in df_multi["Resolution"].unique():
-            res_df = df_multi[df_multi["Resolution"] == resolution]
-            pe_dice = res_df[res_df["Mode"] == "PE"]["Dice"].values
-            rpe_dice = res_df[res_df["Mode"] == "RPE"]["Dice"].values
+        for metric in ["Dice", "Overlap"]:
+            print(f"\n** {metric.upper()} **")
+            for resolution in df_multi["Resolution"].unique():
+                res_df = df_multi[df_multi["Resolution"] == resolution]
+                pe_value = res_df[res_df["Mode"] == "PE"][metric].values
+                rpe_value = res_df[res_df["Mode"] == "RPE"][metric].values
 
-            if len(pe_dice) > 0 and len(rpe_dice) > 0:
-                print(f"\n{resolution}:")
-                print(f"  PE:  {pe_dice[0]:.4f}")
-                print(f"  RPE: {rpe_dice[0]:.4f}")
-                print(f"  Difference: {rpe_dice[0] - pe_dice[0]:.4f}")
+                if len(pe_value) > 0 and len(rpe_value) > 0:
+                    print(f"\n{resolution}:")
+                    print(f"  PE:  {pe_value[0]:.4f}")
+                    print(f"  RPE: {rpe_value[0]:.4f}")
+                    print(f"  Difference: {rpe_value[0] - pe_value[0]:.4f}")
 
-    print("\n" + "=" * 60 + "\n")
+    print("\n" + "=" * 70 + "\n")
 
 
 def main():
