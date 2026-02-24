@@ -156,7 +156,7 @@ codegen/
 data
 data/*
 logs/
-./figures/*
+figures/
 models/
 !epi1/models/
 !epi1/data/
