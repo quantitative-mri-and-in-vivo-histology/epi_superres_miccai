@@ -7,10 +7,11 @@ used by dataset-specific scripts.
 import shutil
 from pathlib import Path
 
+import numpy as np
+
 from utils.cmd_utils import run_command
 from utils.nifti_utils import get_bval_path, get_bvec_path, get_json_path, get_pe_direction, get_readout_time, strip_nifti_ext
 from utils.warp_utils import combine_and_apply_warps, convert_ants_to_flirt
-
 
 def add_suffix(nii_path: Path, suffix: str) -> Path:
     """Add a suffix before .nii.gz, e.g. _denoised.
@@ -295,15 +296,40 @@ def run_dwifslpreproc(
     return output, eddy_output_dir
 
 
-def create_brain_mask(dwi: Path, output_dir: Path) -> Path:
-    """Create brain mask from DWI using BET on mean b=0.
+def extract_mean_b0(dwi: Path, output_path: Path) -> Path:
+    """Extract mean b=0 volume from DWI.
 
     Parameters
     ----------
     dwi : Path
         Input DWI (with matching .bvec/.bval)
+    output_path : Path
+        Output path for mean b=0 image
+
+    Returns
+    -------
+    Path
+        Path to mean b=0 image
+    """
+    bvec = get_bvec_path(dwi)
+    bval = get_bval_path(dwi)
+    run_command(
+        f"dwiextract -bzero -force -fslgrad {bvec} {bval} {dwi} - "
+        f"| mrmath - mean -axis 3 {output_path} -force",
+        verbose=False,
+    )
+    return output_path
+
+
+def create_brain_mask_from_b0(mean_b0: Path, output_dir: Path) -> Path:
+    """Create brain mask from mean b=0 using ANTs brain extraction with OMM-1 T2 FLAIR template.
+
+    Parameters
+    ----------
+    mean_b0 : Path
+        Mean b=0 image
     output_dir : Path
-        Output directory for mask and intermediate files
+        Output directory for mask
 
     Returns
     -------
@@ -311,30 +337,28 @@ def create_brain_mask(dwi: Path, output_dir: Path) -> Path:
         Path to brain mask
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    bvec = get_bvec_path(dwi)
-    bval = get_bval_path(dwi)
 
-    # Extract mean b=0
-    mean_b0 = output_dir / "mean_b0.nii.gz"
+    root = Path(__file__).resolve().parent.parent.parent
+    template = root / "data/templates/OMM-1_T2_FLAIR_head.nii.gz"
+    template_mask = root / "data/templates/OMM-1_T1_brain_mask_average.nii.gz"
+
+    prefix = output_dir / "ants_"
     run_command(
-        f"dwiextract -bzero -force -fslgrad {bvec} {bval} {dwi} - "
-        f"| mrmath - mean -axis 3 {mean_b0} -force",
+        [
+            "antsBrainExtraction.sh",
+            "-d", "3",
+            "-a", str(mean_b0),
+            "-e", str(template),
+            "-m", str(template_mask),
+            "-o", str(prefix),
+        ],
         verbose=False,
     )
 
-    # Brain extraction with BET
-    bet_output = output_dir / "mean_b0_brain"
-    run_command(f"bet {mean_b0} {bet_output} -m -R", verbose=False)
+    brain_mask_path = output_dir / "brain_mask.nii.gz"
+    Path(f"{prefix}BrainExtractionMask.nii.gz").rename(brain_mask_path)
 
-    # Rename mask
-    brain_mask = output_dir / "brain_mask.nii.gz"
-    Path(f"{bet_output}_mask.nii.gz").rename(brain_mask)
-    Path(f"{bet_output}.nii.gz").unlink(missing_ok=True)
-
-    # Erode by 1 voxel to tighten the mask
-    run_command(f"maskfilter {brain_mask} erode {brain_mask} -force", verbose=False)
-
-    return brain_mask
+    return brain_mask_path
 
 
 def _diag_validity_mask(image: Path, mask: Path, diag_low: float, diag_high: float, tmp_dir: Path) -> Path:
@@ -969,8 +993,6 @@ def process_single_mode(
     dwi_dir: Path,
     mode: str,
     nthreads: int = 0,
-    anat_ref_image: Path | None = None,
-    anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
     preprocessed_path: Path | None = None,
     eddy_dir_path: Path | None = None,
@@ -978,8 +1000,7 @@ def process_single_mode(
 ) -> None:
     """Process DWI pair with a specific mode (b0_rpe or full_rpe).
 
-    High-level orchestration function that runs the full DWI processing pipeline:
-    preprocessing → brain masking → tensor fitting → registration → segmentation.
+    High-level orchestration: preprocessing → brain masking → tensor fitting.
 
     Parameters
     ----------
@@ -993,10 +1014,6 @@ def process_single_mode(
         Processing mode: "b0_rpe" or "full_rpe"
     nthreads : int
         Number of threads for topup
-    anat_ref_image : Path, optional
-        Anatomical reference image for registration
-    anat_mask_image : Path, optional
-        Anatomical brain mask to regrid and use (instead of creating from DWI)
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     preprocessed_path : Path, optional
@@ -1016,12 +1033,11 @@ def process_single_mode(
                 f"--skip-preproc: expected preprocessed DWI at {preprocessed_path}"
             )
         preprocessed = preprocessed_path
-        eddy_dir = eddy_dir_path
         print(f"  Skipping preprocessing, using existing: {preprocessed.name}")
     else:
         # Step 1: Preprocessing (dwifslpreproc)
         print(f"  Step 1: Preprocessing (topup/eddy)...")
-        preprocessed, eddy_dir = run_dwifslpreproc(
+        preprocessed, _ = run_dwifslpreproc(
             dwi_forward, dwi_reverse, dwi_dir, mode=mode, nthreads=nthreads, keep_tmp=keep_tmp
         )
         print(f"    Output: {preprocessed.name}")
@@ -1030,38 +1046,16 @@ def process_single_mode(
     print(f"  Step 2: Brain masking...")
     prefix = preprocessed.stem.replace(".nii", "")
     final_mask = dwi_dir / f"{prefix}_brain_mask.nii.gz"
+    mean_b0 = dwi_dir / f"{prefix}_mean_b0.nii.gz"
 
-    if anat_mask_image is not None and anat_mask_image.exists():
-        # Regrid and reorient anatomical mask to match preprocessed DWI exactly
-        print(f"    Regridding anatomical mask: {anat_mask_image.name}")
+    extract_mean_b0(preprocessed, mean_b0)
+    print(f"    Mean b0: {mean_b0.name}")
 
-        # Transform mask to match preprocessed DWI template (geometry + strides)
-        # Using -template alone doesn't guarantee stride matching, so we also
-        # explicitly copy the DWI strides to ensure nibabel loads them identically
-        mask_tmp = dwi_dir / f"_tmp_mask_{mode}.nii.gz"
-        run_command(
-            f"mrtransform {anat_mask_image} -template {preprocessed} "
-            f"-interp nearest {mask_tmp} -force",
-            verbose=False,
-        )
-
-        # Force mask to have identical strides as preprocessed DWI
-        run_command(
-            f"mrconvert {mask_tmp} -strides {preprocessed} {final_mask} -force",
-            verbose=False,
-        )
-
-        # Clean up
-        mask_tmp.unlink(missing_ok=True)
-
-        print(f"    Brain mask (from anat): {final_mask.name}")
-    else:
-        # Create brain mask from DWI
-        mask_tmp = dwi_dir / f"_mask_tmp_{mode}"
-        brain_mask = create_brain_mask(preprocessed, mask_tmp)
-        brain_mask.rename(final_mask)
-        shutil.rmtree(mask_tmp, ignore_errors=True)
-        print(f"    Brain mask (from DWI): {final_mask.name}")
+    mask_tmp = dwi_dir / f"_mask_tmp_{mode}"
+    brain_mask = create_brain_mask_from_b0(mean_b0, mask_tmp)
+    brain_mask.rename(final_mask)
+    shutil.rmtree(mask_tmp, ignore_errors=True)
+    print(f"    Brain mask: {final_mask.name}")
 
     # Create masked DWI
     masked_dwi = dwi_dir / f"{prefix}_masked.nii.gz"
@@ -1072,62 +1066,6 @@ def process_single_mode(
     print(f"  Step 3: Tensor fitting...")
     output_prefix = dwi_dir / prefix
     fit_tensors(preprocessed, output_prefix, final_mask)
-
-    # Step 4: Anatomical registration (optional)
-    if anat_ref_image is not None and anat_ref_image.exists():
-        print(f"  Step 4: Anatomical registration...")
-
-        dwi_anat, anat_mask = register_to_anat_ref(
-            preprocessed_dwi=preprocessed,
-            eddy_output_dir=eddy_dir,
-            anat_ref_image=anat_ref_image,
-            output_dir=dwi_dir,
-            anat_mask_image=anat_mask_image,
-            dwi_mask=final_mask,
-            nthreads=nthreads,
-        )
-
-        print(f"  Step 5: Tensor fitting on registered data...")
-        anat_output_prefix = dwi_dir / dwi_anat.stem.replace(".nii", "")
-        fit_tensors(dwi_anat, anat_output_prefix, anat_mask)
-
-        # Step 6: Tissue segmentation using multi-channel Atropos (FA + S0)
-        print(f"  Step 6: Tissue segmentation (ANTs Atropos, multi-channel)...")
-        anat_fa = Path(f"{anat_output_prefix}_dti_fa.nii.gz")
-        anat_s0 = Path(f"{anat_output_prefix}_dti_s0.nii.gz")
-
-        if anat_fa.exists() and anat_s0.exists():
-            seg_path = dwi_dir / f"{anat_output_prefix.name}_segmentation.nii.gz"
-            prob_prefix = str(dwi_dir / f"{anat_output_prefix.name}_segmentation_prob")
-
-            # Multi-channel Atropos: combine FA (tissue contrast) + S0 (T2-weighted contrast)
-            # Use multiple -a flags for multi-channel input
-            cmd = [
-                "Atropos",
-                "-d", "3",
-                "-a", str(anat_fa),              # Channel 1: FA (tissue contrast)
-                "-a", str(anat_s0),              # Channel 2: S0 (T2-weighted contrast)
-                "-x", str(anat_mask),
-                "-i", "KMeans[3]",               # 3-tissue k-means initialization
-                "-c", "[5,0]",                   # 5 iterations, no partial volume
-                "-m", "[0.1,1x1x1]",             # MRF smoothing (weight=0.1, radius=1)
-                "-o", f"[{seg_path},{prob_prefix}_%02d.nii.gz]"
-            ]
-            run_command(cmd, verbose=False)
-            print(f"    Segmentation: {seg_path.name}")
-
-            # Rename probability maps to meaningful names (1=CSF, 2=GM, 3=WM)
-            prob_csf = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_csf.nii.gz"
-            prob_gm = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_gm.nii.gz"
-            prob_wm = dwi_dir / f"{anat_output_prefix.name}_segmentation_prob_wm.nii.gz"
-
-            Path(f"{prob_prefix}_01.nii.gz").rename(prob_csf)
-            Path(f"{prob_prefix}_02.nii.gz").rename(prob_gm)
-            Path(f"{prob_prefix}_03.nii.gz").rename(prob_wm)
-
-            print(f"    Probability maps: {prob_csf.name}, {prob_gm.name}, {prob_wm.name}")
-        else:
-            print(f"    Skipping segmentation: FA or S0 not found")
 
     print(f"  ✓ Completed {mode} mode")
     print()

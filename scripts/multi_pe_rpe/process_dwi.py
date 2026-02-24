@@ -51,8 +51,6 @@ def process_single_mode(
     dwi_dir: Path,
     mode: str,
     nthreads: int = 0,
-    anat_ref_image: Path | None = None,
-    anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
     keep_tmp: bool = False,
 ) -> None:
@@ -73,8 +71,6 @@ def process_single_mode(
         dwi_dir=dwi_dir,
         mode=mode,
         nthreads=nthreads,
-        anat_ref_image=anat_ref_image,
-        anat_mask_image=anat_mask_image,
         skip_preproc=skip_preproc,
         preprocessed_path=preprocessed_path,
         eddy_dir_path=eddy_dir_path,
@@ -87,8 +83,6 @@ def process_dwi_pair(
     dwi_rl: Path,
     dwi_dir: Path,
     nthreads: int = 0,
-    anat_ref_image: Path | None = None,
-    anat_mask_image: Path | None = None,
     skip_preproc: bool = False,
     keep_tmp: bool = False,
 ) -> None:
@@ -104,10 +98,6 @@ def process_dwi_pair(
         DWI directory (for output)
     nthreads : int
         Number of threads for topup
-    anat_ref_image : Path, optional
-        Anatomical reference image for registration
-    anat_mask_image : Path, optional
-        Anatomical brain mask to regrid and use
     skip_preproc : bool
         Skip dwifslpreproc, use existing preprocessed DWI
     keep_tmp : bool
@@ -118,8 +108,8 @@ def process_dwi_pair(
     print()
 
     # Process with both modes
-    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="b0_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
-    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="full_rpe", nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="b0_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+    process_single_mode(dwi_lr, dwi_rl, dwi_dir, mode="full_rpe", nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
 
     print(f"  ✓ Completed all modes for lr/rl pair")
 
@@ -144,10 +134,6 @@ def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, s
         print(f"  No dwi/ folder at {dwi_dir}, skipping")
         return
 
-    # No anatomical reference for multi_pe_rpe dataset
-    anat_ref_image = None
-    anat_mask_image = None
-
     # Find lr/rl pair
     pe_pair = find_lr_rl_pair(dwi_dir)
 
@@ -159,7 +145,7 @@ def process_resolution(dwi_dir: Path, resolution_name: str, nthreads: int = 0, s
     print(f"  Found lr/rl pair [{resolution_name}]")
 
     try:
-        process_dwi_pair(dwi_lr, dwi_rl, dwi_dir, nthreads=nthreads, anat_ref_image=anat_ref_image, anat_mask_image=anat_mask_image, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
+        process_dwi_pair(dwi_lr, dwi_rl, dwi_dir, nthreads=nthreads, skip_preproc=skip_preproc, keep_tmp=keep_tmp)
     except Exception as e:
         print(f"  ERROR: Failed to process lr/rl pair: {e}")
         return
